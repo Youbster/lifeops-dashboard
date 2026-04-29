@@ -324,6 +324,42 @@ function useToast() {
   return { toasts, add }
 }
 
+function useSwipeGesture(onSwipeLeft, onSwipeRight) {
+  const [offset, setOffset]   = useState(0)
+  const startX  = useRef(null)
+  const startY  = useRef(null)
+  const locked  = useRef(null) // 'h' | 'v' | null
+
+  const onTouchStart = useCallback((e) => {
+    startX.current = e.touches[0].clientX
+    startY.current = e.touches[0].clientY
+    locked.current = null
+    setOffset(0)
+  }, [])
+
+  const onTouchMove = useCallback((e) => {
+    if (startX.current === null) return
+    const dx = e.touches[0].clientX - startX.current
+    const dy = e.touches[0].clientY - startY.current
+    if (!locked.current && (Math.abs(dx) > 8 || Math.abs(dy) > 8))
+      locked.current = Math.abs(dx) >= Math.abs(dy) ? 'h' : 'v'
+    if (locked.current === 'h')
+      setOffset(Math.max(-110, Math.min(110, dx)))
+  }, [])
+
+  const onTouchEnd = useCallback(() => {
+    if (locked.current === 'h') {
+      if (offset >  70) onSwipeRight?.()
+      if (offset < -70) onSwipeLeft?.()
+    }
+    setOffset(0)
+    startX.current = null
+    locked.current = null
+  }, [offset, onSwipeLeft, onSwipeRight])
+
+  return { offset, onTouchStart, onTouchMove, onTouchEnd }
+}
+
 // ─── Settings Panel ───────────────────────────────────────────────────────────
 
 function SettingsPanel({ apiKey, onSave, onClose }) {
@@ -629,129 +665,161 @@ function EditModal({ task, onSave, onClose }) {
 // ─── Task Card ────────────────────────────────────────────────────────────────
 
 function TaskCard({ task, onToggle, onDelete, onUpdate, onToggleSubtask }) {
-  const [expanded, setExpanded]   = useState(false)
-  const [showEdit, setShowEdit]   = useState(false)
-  const [showActions, setShowActions] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  const [showEdit, setShowEdit] = useState(false)
 
-  const cat    = CATEGORY_MAP[task.category] || CATEGORIES[0]
-  const bucket = classifyTask(task)
+  const cat      = CATEGORY_MAP[task.category] || CATEGORIES[0]
+  const bucket   = classifyTask(task)
   const subtasks = task.subtasks || []
   const doneSubs = subtasks.filter(s => s.done).length
   const hasExtra = task.notes || subtasks.length > 0
 
+  const { offset, onTouchStart, onTouchMove, onTouchEnd } = useSwipeGesture(
+    () => onDelete(task.id),
+    () => onToggle(task.id),
+  )
+
+  const swipeProgress  = Math.min(Math.abs(offset) / 70, 1)
+  const isSwipingRight = offset > 8
+  const isSwipingLeft  = offset < -8
+  const bgColor = isSwipingRight
+    ? `rgba(16,185,129,${swipeProgress * 0.85})`
+    : isSwipingLeft
+      ? `rgba(239,68,68,${swipeProgress * 0.85})`
+      : 'transparent'
+
   return (
     <>
-      <div
-        className={`group relative bg-white/5 border border-white/5 rounded-xl overflow-hidden
-          transition-all duration-200 hover:bg-white/[0.07] hover:border-white/10
-          ${task.completed ? 'opacity-50' : ''} animate-fade-in`}
-        onMouseEnter={() => setShowActions(true)}
-        onMouseLeave={() => setShowActions(false)}
-        onTouchStart={() => setShowActions(true)}
-      >
-        {/* category color bar */}
-        <div className="h-1" style={{ backgroundColor: cat.color }} />
+      {/* Swipe container */}
+      <div className={`relative rounded-xl overflow-hidden animate-fade-in ${task.completed ? 'opacity-50' : ''}`}
+        style={{ backgroundColor: bgColor }}>
 
-        <div className="p-4">
-          <div className="flex items-start gap-3">
-            {/* Checkbox */}
-            <button onClick={() => onToggle(task.id)}
-              className={`mt-0.5 flex-shrink-0 w-6 h-6 rounded-full border-2 flex items-center justify-center
-                transition-all duration-200
-                ${task.completed ? 'bg-emerald-500 border-emerald-500' : 'border-slate-500 hover:border-emerald-400'}`}>
-              {task.completed && <Check size={14} className="text-white animate-checkmark" />}
-            </button>
+        {/* Swipe hint icons (revealed behind sliding card) */}
+        <div className="absolute inset-0 flex items-center justify-between px-5 pointer-events-none">
+          <div className="flex items-center gap-2" style={{ opacity: isSwipingRight ? swipeProgress : 0 }}>
+            <Check size={18} className="text-white" />
+            <span className="text-white text-xs font-semibold">{task.completed ? 'Undo' : 'Done'}</span>
+          </div>
+          <div className="flex items-center gap-2" style={{ opacity: isSwipingLeft ? swipeProgress : 0 }}>
+            <span className="text-white text-xs font-semibold">Delete</span>
+            <Trash2 size={18} className="text-white" />
+          </div>
+        </div>
 
-            {/* Body */}
-            <div className="flex-1 min-w-0">
-              <p className={`text-sm leading-relaxed ${task.completed ? 'line-through text-slate-500' : 'text-slate-200'}`}>
-                {task.title}
-              </p>
+        {/* Sliding card */}
+        <div
+          className="group relative bg-white/5 border border-white/5 rounded-xl overflow-hidden
+            hover:bg-white/[0.07] hover:border-white/10 transition-colors duration-200"
+          style={{
+            transform: `translateX(${offset}px)`,
+            transition: offset === 0 ? 'transform 0.3s cubic-bezier(0.25,0.46,0.45,0.94)' : 'none',
+          }}
+          onTouchStart={onTouchStart}
+          onTouchMove={onTouchMove}
+          onTouchEnd={onTouchEnd}
+        >
+          {/* category color bar */}
+          <div className="h-1" style={{ backgroundColor: cat.color }} />
 
-              {/* Meta row */}
-              <div className="flex flex-wrap items-center gap-2 mt-2">
-                <span className="text-[11px] px-2 py-0.5 rounded-full font-medium"
-                  style={{ backgroundColor: cat.color + '22', color: cat.color }}>
-                  {cat.label}
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: PRIORITIES[task.priority] }} />
-                  <span className="text-[11px] text-slate-500 capitalize">{task.priority}</span>
-                </span>
-                {task.dueDate && (
-                  <span className={`text-[11px] flex items-center gap-1 ${bucket === 'overdue' ? 'text-red-400' : 'text-slate-500'}`}>
-                    <Calendar size={11} />
-                    {formatDate(task.dueDate)}
+          <div className="p-4">
+            <div className="flex items-start gap-3">
+              {/* Checkbox */}
+              <button onClick={() => onToggle(task.id)}
+                className={`mt-0.5 flex-shrink-0 w-6 h-6 rounded-full border-2 flex items-center justify-center
+                  transition-all duration-200
+                  ${task.completed ? 'bg-emerald-500 border-emerald-500' : 'border-slate-500 hover:border-emerald-400'}`}>
+                {task.completed && <Check size={14} className="text-white animate-checkmark" />}
+              </button>
+
+              {/* Body */}
+              <div className="flex-1 min-w-0">
+                <p className={`text-sm leading-relaxed ${task.completed ? 'line-through text-slate-500' : 'text-slate-200'}`}>
+                  {task.title}
+                </p>
+
+                {/* Meta row */}
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  <span className="text-[11px] px-2 py-0.5 rounded-full font-medium"
+                    style={{ backgroundColor: cat.color + '22', color: cat.color }}>
+                    {cat.label}
                   </span>
-                )}
-                {task.duration && (
-                  <span className="text-[11px] flex items-center gap-1 text-slate-500">
-                    <Zap size={10} className="text-amber-500" />
-                    {DURATION_LABELS[task.duration]}
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: PRIORITIES[task.priority] }} />
+                    <span className="text-[11px] text-slate-500 capitalize">{task.priority}</span>
                   </span>
-                )}
-                {task.type !== 'todo' && (
-                  <span className="text-[11px] text-slate-500 bg-white/5 px-1.5 py-0.5 rounded capitalize">
-                    {task.type}
-                  </span>
-                )}
-                {subtasks.length > 0 && (
-                  <span className="text-[11px] text-slate-500">
-                    {doneSubs}/{subtasks.length} steps
-                  </span>
+                  {task.dueDate && (
+                    <span className={`text-[11px] flex items-center gap-1 ${bucket === 'overdue' ? 'text-red-400' : 'text-slate-500'}`}>
+                      <Calendar size={11} />
+                      {formatDate(task.dueDate)}
+                    </span>
+                  )}
+                  {task.duration && (
+                    <span className="text-[11px] flex items-center gap-1 text-slate-500">
+                      <Zap size={10} className="text-amber-500" />
+                      {DURATION_LABELS[task.duration]}
+                    </span>
+                  )}
+                  {task.type !== 'todo' && (
+                    <span className="text-[11px] text-slate-500 bg-white/5 px-1.5 py-0.5 rounded capitalize">
+                      {task.type}
+                    </span>
+                  )}
+                  {subtasks.length > 0 && (
+                    <span className="text-[11px] text-slate-500">{doneSubs}/{subtasks.length} steps</span>
+                  )}
+                </div>
+
+                {/* Expand toggle */}
+                {hasExtra && (
+                  <button onClick={() => setExpanded(e => !e)}
+                    className="mt-2 flex items-center gap-1 text-[11px] text-slate-600 hover:text-slate-400 transition-colors">
+                    {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                    {expanded ? 'Less' : 'Details'}
+                  </button>
                 )}
               </div>
 
-              {/* Expand toggle */}
-              {hasExtra && (
-                <button onClick={() => setExpanded(e => !e)}
-                  className="mt-2 flex items-center gap-1 text-[11px] text-slate-600 hover:text-slate-400 transition-colors">
-                  {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                  {expanded ? 'Less' : 'Details'}
+              {/* Edit button — always visible; trash only on desktop hover */}
+              <div className="flex items-center gap-0.5 flex-shrink-0">
+                <button onClick={() => setShowEdit(true)}
+                  className="p-2.5 text-slate-500 hover:text-blue-400 rounded-lg hover:bg-white/5 transition-colors">
+                  <Pencil size={14} />
                 </button>
-              )}
+                <button onClick={() => onDelete(task.id)}
+                  className="p-2.5 text-slate-500 hover:text-red-400 rounded-lg hover:bg-white/5 transition-colors
+                    opacity-0 group-hover:opacity-100 sm:block hidden">
+                  <Trash2 size={14} />
+                </button>
+              </div>
             </div>
 
-            {/* Action buttons */}
-            <div className={`flex items-center gap-1 flex-shrink-0 transition-opacity duration-200
-              ${showActions ? 'opacity-100' : 'opacity-0 sm:group-hover:opacity-100'}`}>
-              <button onClick={() => setShowEdit(true)}
-                className="p-2 text-slate-500 hover:text-blue-400 rounded-lg hover:bg-white/5 transition-colors">
-                <Pencil size={14} />
-              </button>
-              <button onClick={() => onDelete(task.id)}
-                className="p-2 text-slate-500 hover:text-red-400 rounded-lg hover:bg-white/5 transition-colors">
-                <Trash2 size={14} />
-              </button>
-            </div>
+            {/* Expanded details */}
+            {expanded && hasExtra && (
+              <div className="mt-3 ml-9 space-y-3 animate-slide-down">
+                {task.notes && (
+                  <div className="flex gap-2">
+                    <BookOpen size={12} className="text-slate-600 mt-0.5 flex-shrink-0" />
+                    <p className="text-xs text-slate-400 leading-relaxed">{task.notes}</p>
+                  </div>
+                )}
+                {subtasks.length > 0 && (
+                  <div className="space-y-1.5">
+                    {subtasks.map(s => (
+                      <button key={s.id} onClick={() => onToggleSubtask(task.id, s.id)}
+                        className="flex items-center gap-2 w-full text-left group/sub">
+                        {s.done
+                          ? <CheckSquare size={13} className="text-emerald-400 flex-shrink-0" />
+                          : <Square size={13} className="text-slate-600 group-hover/sub:text-slate-400 flex-shrink-0" />}
+                        <span className={`text-xs ${s.done ? 'line-through text-slate-600' : 'text-slate-400 group-hover/sub:text-slate-300'}`}>
+                          {s.text}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-
-          {/* Expanded details */}
-          {expanded && hasExtra && (
-            <div className="mt-3 ml-9 space-y-3 animate-slide-down">
-              {task.notes && (
-                <div className="flex gap-2">
-                  <BookOpen size={12} className="text-slate-600 mt-0.5 flex-shrink-0" />
-                  <p className="text-xs text-slate-400 leading-relaxed">{task.notes}</p>
-                </div>
-              )}
-              {subtasks.length > 0 && (
-                <div className="space-y-1.5">
-                  {subtasks.map(s => (
-                    <button key={s.id} onClick={() => onToggleSubtask(task.id, s.id)}
-                      className="flex items-center gap-2 w-full text-left group/sub">
-                      {s.done
-                        ? <CheckSquare size={13} className="text-emerald-400 flex-shrink-0" />
-                        : <Square size={13} className="text-slate-600 group-hover/sub:text-slate-400 flex-shrink-0" />}
-                      <span className={`text-xs ${s.done ? 'line-through text-slate-600' : 'text-slate-400 group-hover/sub:text-slate-300'}`}>
-                        {s.text}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
 
@@ -1161,6 +1229,42 @@ function Toast({ toasts }) {
   )
 }
 
+// ─── Bottom Nav ──────────────────────────────────────────────────────────────
+
+function BottomNav({ activeTab, setActiveTab, activeTasks }) {
+  return (
+    <nav className="fixed bottom-0 left-0 right-0 z-40
+      bg-[#0a0d14]/95 backdrop-blur-xl border-t border-white/10"
+      style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+      <div className="max-w-2xl mx-auto flex">
+        <button
+          onClick={() => setActiveTab('tasks')}
+          className={`flex-1 flex flex-col items-center justify-center py-3 gap-1 transition-colors
+            ${activeTab === 'tasks' ? 'text-purple-400' : 'text-slate-600 hover:text-slate-400'}`}>
+          <div className="relative">
+            <ListTodo size={22} />
+            {activeTasks > 0 && (
+              <span className="absolute -top-1.5 -right-2.5 text-[9px] bg-purple-500 text-white
+                rounded-full min-w-[16px] h-4 flex items-center justify-center px-1 font-bold leading-none">
+                {activeTasks > 99 ? '99+' : activeTasks}
+              </span>
+            )}
+          </div>
+          <span className="text-[10px] font-medium">Tasks</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('insights')}
+          className={`flex-1 flex flex-col items-center justify-center py-3 gap-1 transition-colors
+            ${activeTab === 'insights' ? 'text-purple-400' : 'text-slate-600 hover:text-slate-400'}`}>
+          <BarChart2 size={22} />
+          <span className="text-[10px] font-medium">Insights</span>
+        </button>
+      </div>
+    </nav>
+  )
+}
+
 // ─── App ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -1218,7 +1322,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen min-h-[100dvh] text-white">
-      <div className="max-w-2xl mx-auto px-4 py-6 pb-24">
+      <div className="max-w-2xl mx-auto px-4 py-6 pb-32">
 
         {/* Header */}
         <header className="text-center mb-6 relative">
@@ -1240,25 +1344,6 @@ export default function App() {
         )}
 
         <QuickCapture onAdd={addTask} addToast={addToast} apiKey={apiKey} />
-
-        {/* Tab switcher */}
-        <div className="flex gap-1 mb-6 bg-white/5 p-1 rounded-xl">
-          <button onClick={() => setActiveTab('tasks')}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all duration-200
-              ${activeTab === 'tasks' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300'}`}>
-            <ListTodo size={15} /> Tasks
-            {tasks.filter(t => !t.completed).length > 0 && (
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${activeTab === 'tasks' ? 'bg-purple-500/30 text-purple-300' : 'bg-white/5 text-slate-500'}`}>
-                {tasks.filter(t => !t.completed).length}
-              </span>
-            )}
-          </button>
-          <button onClick={() => setActiveTab('insights')}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all duration-200
-              ${activeTab === 'insights' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-300'}`}>
-            <BarChart2 size={15} /> Insights
-          </button>
-        </div>
 
         {/* Tasks tab */}
         {activeTab === 'tasks' && (
@@ -1313,6 +1398,7 @@ export default function App() {
       </div>
 
       <Toast toasts={toasts} />
+      <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} activeTasks={tasks.filter(t => !t.completed).length} />
     </div>
   )
 }
