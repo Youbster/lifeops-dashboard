@@ -3,7 +3,8 @@ import {
   Mic, MicOff, Search, Plus, Check, Trash2, Pencil, X,
   ChevronDown, ChevronRight, AlertTriangle, Target,
   Calendar, Clock, Lightbulb, Settings, Sparkles, Loader2, Eye, EyeOff,
-  TrendingUp, BarChart2, Zap, ListTodo, ChevronUp, BookOpen, CheckSquare, Square
+  TrendingUp, BarChart2, Zap, ListTodo, ChevronUp, BookOpen, CheckSquare, Square,
+  Wand2, Send, RotateCcw, MessageSquare
 } from 'lucide-react'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -239,9 +240,10 @@ function useTasks() {
       : t
   )), [])
 
+  const restoreTask   = useCallback((task) => setTasks(prev => [task, ...prev]), [])
   const clearCompleted = useCallback(() => setTasks(prev => prev.filter(t => !t.completed)), [])
 
-  return { tasks, addTask, toggleTask, deleteTask, updateTask, toggleSubtask, clearCompleted }
+  return { tasks, addTask, toggleTask, deleteTask, restoreTask, updateTask, toggleSubtask, clearCompleted }
 }
 
 function useVoiceInput() {
@@ -313,15 +315,21 @@ function useVoiceInput() {
 
 function useToast() {
   const [toasts, setToasts] = useState([])
-  const add = useCallback((message, variant = 'success') => {
-    const id = Date.now()
-    setToasts(prev => [...prev, { id, message, variant, exiting: false }])
-    setTimeout(() => {
-      setToasts(prev => prev.map(t => t.id === id ? { ...t, exiting: true } : t))
-      setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 250)
-    }, 2500)
+  const timerRefs = useRef({})
+
+  const dismiss = useCallback((id) => {
+    setToasts(prev => prev.map(t => t.id === id ? { ...t, exiting: true } : t))
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 250)
   }, [])
-  return { toasts, add }
+
+  const add = useCallback((message, variant = 'success', onUndo = null) => {
+    const id = Date.now()
+    const duration = onUndo ? 5000 : 2500
+    setToasts(prev => [...prev, { id, message, variant, exiting: false, onUndo }])
+    timerRefs.current[id] = setTimeout(() => dismiss(id), duration)
+  }, [dismiss])
+
+  return { toasts, add, dismiss }
 }
 
 function useSwipeGesture(onSwipeLeft, onSwipeRight) {
@@ -349,8 +357,8 @@ function useSwipeGesture(onSwipeLeft, onSwipeRight) {
 
   const onTouchEnd = useCallback(() => {
     if (locked.current === 'h') {
-      if (offset >  70) onSwipeRight?.()
-      if (offset < -70) onSwipeLeft?.()
+      if (offset >  70) { navigator.vibrate?.(40); onSwipeRight?.() }
+      if (offset < -70) { navigator.vibrate?.([40, 30, 40]); onSwipeLeft?.() }
     }
     setOffset(0)
     startX.current = null
@@ -662,11 +670,103 @@ function EditModal({ task, onSave, onClose }) {
   )
 }
 
+// ─── AI helpers ──────────────────────────────────────────────────────────────
+
+async function aiEditTask(instruction, task, apiKey) {
+  const today   = new Date()
+  const todayStr = toLocalDateStr(today)
+  const dayName  = today.toLocaleDateString('en-US', { weekday: 'long' })
+  const resp = await fetch('/api/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instruction, task, todayStr, dayName, apiKey }),
+  })
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}))
+    throw new Error(e.error || `HTTP ${resp.status}`)
+  }
+  return resp.json()
+}
+
+async function aiAssist(messages, tasks, apiKey) {
+  const today    = new Date()
+  const todayStr = toLocalDateStr(today)
+  const dayName  = today.toLocaleDateString('en-US', { weekday: 'long' })
+  const resp = await fetch('/api/assist', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, tasks, todayStr, dayName, apiKey }),
+  })
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}))
+    throw new Error(e.error || `HTTP ${resp.status}`)
+  }
+  return resp.json()
+}
+
+// Renders AI response: **bold**, • bullets, line breaks
+function AiText({ text }) {
+  return (
+    <div className="space-y-2 text-sm text-slate-300 leading-relaxed">
+      {text.split('\n\n').map((para, i) => {
+        const lines = para.split('\n').filter(Boolean)
+        const isList = lines.length > 1 && lines.every(l => /^[•\-*]\s/.test(l.trim()))
+        if (isList) return (
+          <ul key={i} className="space-y-1.5 pl-1">
+            {lines.map((line, j) => (
+              <li key={j} className="flex gap-2">
+                <span className="text-purple-400 mt-0.5 flex-shrink-0">•</span>
+                <span><InlineBold text={line.replace(/^[•\-*]\s/, '')} /></span>
+              </li>
+            ))}
+          </ul>
+        )
+        return (
+          <p key={i}>
+            {lines.map((line, j) => (
+              <span key={j}>{j > 0 && <br />}<InlineBold text={line} /></span>
+            ))}
+          </p>
+        )
+      })}
+    </div>
+  )
+}
+
+function InlineBold({ text }) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/)
+  return <>{parts.map((p, i) =>
+    p.startsWith('**') && p.endsWith('**')
+      ? <strong key={i} className="text-white font-semibold">{p.slice(2,-2)}</strong>
+      : <span key={i}>{p}</span>
+  )}</>
+}
+
 // ─── Task Card ────────────────────────────────────────────────────────────────
 
-function TaskCard({ task, onToggle, onDelete, onUpdate, onToggleSubtask }) {
-  const [expanded, setExpanded] = useState(false)
-  const [showEdit, setShowEdit] = useState(false)
+function TaskCard({ task, onToggle, onDelete, onUpdate, onToggleSubtask, apiKey, addToast }) {
+  const [expanded, setExpanded]     = useState(false)
+  const [showEdit, setShowEdit]     = useState(false)
+  const [showAIEdit, setShowAIEdit] = useState(false)
+  const [aiInstruct, setAiInstruct] = useState('')
+  const [aiEditing, setAiEditing]   = useState(false)
+  const aiInputRef = useRef(null)
+
+  const handleAIEdit = async () => {
+    if (!aiInstruct.trim() || aiEditing) return
+    setAiEditing(true)
+    try {
+      const changes = await aiEditTask(aiInstruct.trim(), task, apiKey)
+      onUpdate(task.id, changes)
+      const fields = Object.keys(changes).join(', ')
+      addToast?.(`✦ Updated: ${fields}`)
+      setShowAIEdit(false)
+      setAiInstruct('')
+    } catch (err) {
+      addToast?.(`⚠ ${err.message.slice(0, 60)}`, 'error')
+    }
+    setAiEditing(false)
+  }
 
   const cat      = CATEGORY_MAP[task.category] || CATEGORIES[0]
   const bucket   = classifyTask(task)
@@ -779,8 +879,13 @@ function TaskCard({ task, onToggle, onDelete, onUpdate, onToggleSubtask }) {
                 )}
               </div>
 
-              {/* Edit button — always visible; trash only on desktop hover */}
+              {/* Action buttons */}
               <div className="flex items-center gap-0.5 flex-shrink-0">
+                <button onClick={() => { setShowAIEdit(e => !e); setTimeout(() => aiInputRef.current?.focus(), 50) }}
+                  className={`p-2.5 rounded-lg transition-colors ${showAIEdit ? 'text-purple-400 bg-purple-500/10' : 'text-slate-500 hover:text-purple-400 hover:bg-white/5'}`}
+                  title="Edit with AI">
+                  <Wand2 size={14} />
+                </button>
                 <button onClick={() => setShowEdit(true)}
                   className="p-2.5 text-slate-500 hover:text-blue-400 rounded-lg hover:bg-white/5 transition-colors">
                   <Pencil size={14} />
@@ -792,6 +897,32 @@ function TaskCard({ task, onToggle, onDelete, onUpdate, onToggleSubtask }) {
                 </button>
               </div>
             </div>
+
+            {/* AI Edit inline */}
+            {showAIEdit && (
+              <div className="mt-3 ml-9 animate-slide-down">
+                <div className="flex gap-2 items-center">
+                  <Wand2 size={12} className="text-purple-400 flex-shrink-0" />
+                  <input
+                    ref={aiInputRef}
+                    value={aiInstruct}
+                    onChange={e => setAiInstruct(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleAIEdit(); if (e.key === 'Escape') setShowAIEdit(false) }}
+                    placeholder='"move to Friday" · "make urgent" · "add note: bring ID"'
+                    disabled={aiEditing}
+                    className="flex-1 bg-purple-500/10 border border-purple-500/20 rounded-lg px-3 py-2
+                      text-white text-xs placeholder-slate-600 focus:outline-none focus:border-purple-500/50
+                      disabled:opacity-50"
+                  />
+                  <button onClick={handleAIEdit} disabled={!aiInstruct.trim() || aiEditing}
+                    className="p-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 rounded-lg transition-colors flex-shrink-0">
+                    {aiEditing
+                      ? <Loader2 size={13} className="animate-spin text-white" />
+                      : <Send size={13} className="text-white" />}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Expanded details */}
             {expanded && hasExtra && (
@@ -836,7 +967,7 @@ function TaskCard({ task, onToggle, onDelete, onUpdate, onToggleSubtask }) {
 
 // ─── Task Section ─────────────────────────────────────────────────────────────
 
-function TaskSection({ title, icon: Icon, tasks, color, badge, onToggle, onDelete, onUpdate, onToggleSubtask, defaultOpen = true }) {
+function TaskSection({ title, icon: Icon, tasks, color, badge, onToggle, onDelete, onUpdate, onToggleSubtask, apiKey, addToast, defaultOpen = true }) {
   const [isOpen, setIsOpen] = useState(defaultOpen)
   if (tasks.length === 0) return null
 
@@ -857,7 +988,8 @@ function TaskSection({ title, icon: Icon, tasks, color, badge, onToggle, onDelet
         <div className="space-y-2 animate-slide-down">
           {tasks.map(task => (
             <TaskCard key={task.id} task={task}
-              onToggle={onToggle} onDelete={onDelete} onUpdate={onUpdate} onToggleSubtask={onToggleSubtask} />
+              onToggle={onToggle} onDelete={onDelete} onUpdate={onUpdate}
+              onToggleSubtask={onToggleSubtask} apiKey={apiKey} addToast={addToast} />
           ))}
         </div>
       )}
@@ -1213,18 +1345,189 @@ function InsightsDashboard({ tasks }) {
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
 
-function Toast({ toasts }) {
+function Toast({ toasts, dismiss }) {
   if (!toasts.length) return null
   return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center">
+    <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center w-full max-w-sm px-4">
       {toasts.map(t => (
         <div key={t.id}
-          className={`px-5 py-3 rounded-xl text-sm font-medium shadow-2xl backdrop-blur-sm
-            ${t.variant === 'success' ? 'bg-emerald-500/90 text-white' : 'bg-red-500/90 text-white'}
+          className={`w-full flex items-center justify-between gap-3 px-4 py-3 rounded-xl text-sm
+            font-medium shadow-2xl backdrop-blur-sm
+            ${t.variant === 'success' ? 'bg-emerald-500/90 text-white' :
+              t.variant === 'error'   ? 'bg-red-500/90 text-white' :
+                                        'bg-slate-800 border border-white/10 text-white'}
             ${t.exiting ? 'toast-exit' : 'toast-enter'}`}>
-          {t.message}
+          <span className="flex-1 truncate">{t.message}</span>
+          {t.onUndo && (
+            <button
+              onClick={() => { t.onUndo(); dismiss(t.id) }}
+              className="flex-shrink-0 text-xs font-bold underline underline-offset-2 hover:no-underline
+                opacity-90 hover:opacity-100 transition-opacity">
+              Undo
+            </button>
+          )}
         </div>
       ))}
+    </div>
+  )
+}
+
+// ─── AI Assistant Tab ─────────────────────────────────────────────────────────
+
+const QUICK_PROMPTS = [
+  { label: "Today's focus",    text: "What should I focus on today? Pick 3 tasks max and explain why." },
+  { label: 'Weekly review',    text: 'Give me a weekly review: what I accomplished, what needs attention, and my top 3 priorities for this week.' },
+  { label: 'What\'s urgent?',  text: 'What are my most urgent and overdue tasks right now?' },
+  { label: 'Quick wins',       text: 'What quick tasks (under 5 min) can I knock out right now?' },
+  { label: 'Prioritize',       text: 'Help me prioritize my active tasks. What should I do first, second, third?' },
+  { label: 'What am I forgetting?', text: 'Looking at my tasks, is there anything that seems neglected, risky, or that I might be forgetting?' },
+]
+
+function AssistantTab({ tasks, apiKey }) {
+  const [messages, setMessages]   = useState([])
+  const [input, setInput]         = useState('')
+  const [loading, setLoading]     = useState(false)
+  const bottomRef = useRef(null)
+  const inputRef  = useRef(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, loading])
+
+  const send = useCallback(async (text) => {
+    const trimmed = (text || input).trim()
+    if (!trimmed || loading) return
+    setInput('')
+    const userMsg = { role: 'user', content: trimmed }
+    setMessages(prev => [...prev, userMsg])
+    setLoading(true)
+    try {
+      const history = [...messages, userMsg]
+      const { response } = await aiAssist(
+        history.map(m => ({ role: m.role, content: m.content })),
+        tasks,
+        apiKey,
+      )
+      setMessages(prev => [...prev, { role: 'assistant', content: response }])
+    } catch (err) {
+      setMessages(prev => [...prev, { role: 'assistant', content: `⚠ ${err.message.slice(0, 80)}` }])
+    }
+    setLoading(false)
+    setTimeout(() => inputRef.current?.focus(), 100)
+  }, [input, loading, messages, tasks, apiKey])
+
+  const activeTasks = tasks.filter(t => !t.completed)
+  const overdue = activeTasks.filter(t => classifyTask(t) === 'overdue')
+
+  return (
+    <div className="flex flex-col" style={{ minHeight: 'calc(100dvh - 180px)' }}>
+
+      {/* Context pill */}
+      <div className="flex items-center gap-2 mb-4 px-1">
+        <Sparkles size={13} className="text-purple-400" />
+        <span className="text-xs text-slate-500">
+          Knows your {activeTasks.length} active tasks
+          {overdue.length > 0 && <span className="text-red-400 ml-1">· {overdue.length} overdue</span>}
+        </span>
+        {messages.length > 0 && (
+          <button onClick={() => setMessages([])}
+            className="ml-auto flex items-center gap-1 text-[11px] text-slate-600 hover:text-slate-400 transition-colors">
+            <RotateCcw size={11} /> Clear
+          </button>
+        )}
+      </div>
+
+      {/* Quick prompts */}
+      {messages.length === 0 && (
+        <div className="mb-4">
+          <div className="flex flex-wrap gap-2">
+            {QUICK_PROMPTS.map(p => (
+              <button key={p.label} onClick={() => send(p.text)}
+                disabled={loading}
+                className="px-3 py-2 bg-white/5 hover:bg-purple-500/15 border border-white/10
+                  hover:border-purple-500/30 rounded-xl text-xs text-slate-400 hover:text-purple-300
+                  transition-all duration-200 disabled:opacity-50">
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {messages.length === 0 && !loading && (
+        <div className="flex-1 flex flex-col items-center justify-center text-center py-8 gap-3">
+          <div className="w-14 h-14 rounded-2xl bg-purple-500/10 flex items-center justify-center">
+            <MessageSquare size={26} className="text-purple-400" />
+          </div>
+          <p className="text-slate-400 text-sm font-medium">Ask me anything about your tasks</p>
+          <p className="text-slate-600 text-xs max-w-xs">
+            "What should I do today?", "What's overdue?", "Give me a weekly review" — I know your full task list.
+          </p>
+        </div>
+      )}
+
+      {/* Messages */}
+      {messages.length > 0 && (
+        <div className="flex-1 space-y-4 mb-4">
+          {messages.map((m, i) => (
+            <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              {m.role === 'assistant' && (
+                <div className="w-7 h-7 rounded-full bg-purple-500/20 flex items-center justify-center mr-2 flex-shrink-0 mt-0.5">
+                  <Sparkles size={13} className="text-purple-400" />
+                </div>
+              )}
+              <div className={`max-w-[85%] rounded-2xl px-4 py-3 ${
+                m.role === 'user'
+                  ? 'bg-purple-600 text-white text-sm rounded-tr-sm'
+                  : 'bg-white/5 border border-white/10 rounded-tl-sm'
+              }`}>
+                {m.role === 'user'
+                  ? <p className="text-sm">{m.content}</p>
+                  : <AiText text={m.content} />}
+              </div>
+            </div>
+          ))}
+
+          {loading && (
+            <div className="flex justify-start">
+              <div className="w-7 h-7 rounded-full bg-purple-500/20 flex items-center justify-center mr-2 flex-shrink-0">
+                <Sparkles size={13} className="text-purple-400" />
+              </div>
+              <div className="bg-white/5 border border-white/10 rounded-2xl rounded-tl-sm px-4 py-3">
+                <div className="flex gap-1 items-center">
+                  <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+      )}
+
+      {/* Input */}
+      <div className="sticky bottom-0 pt-3 pb-1">
+        <div className="flex gap-2">
+          <input
+            ref={inputRef}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+            placeholder="Ask about your tasks…"
+            disabled={loading}
+            className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white text-sm
+              placeholder-slate-500 focus:outline-none focus:border-purple-500/40 disabled:opacity-50
+              transition-all duration-200"
+          />
+          <button onClick={() => send()} disabled={!input.trim() || loading}
+            className="p-3.5 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-700 disabled:text-slate-500
+              text-white rounded-2xl transition-all duration-200 active:scale-95 flex-shrink-0">
+            {loading ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1232,34 +1535,32 @@ function Toast({ toasts }) {
 // ─── Bottom Nav ──────────────────────────────────────────────────────────────
 
 function BottomNav({ activeTab, setActiveTab, activeTasks }) {
+  const tabs = [
+    { id: 'tasks',    icon: ListTodo,      label: 'Tasks',    badge: activeTasks },
+    { id: 'ai',       icon: Sparkles,      label: 'AI',       badge: 0 },
+    { id: 'insights', icon: BarChart2,     label: 'Insights', badge: 0 },
+  ]
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-40
       bg-[#0a0d14]/95 backdrop-blur-xl border-t border-white/10"
       style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
       <div className="max-w-2xl mx-auto flex">
-        <button
-          onClick={() => setActiveTab('tasks')}
-          className={`flex-1 flex flex-col items-center justify-center py-3 gap-1 transition-colors
-            ${activeTab === 'tasks' ? 'text-purple-400' : 'text-slate-600 hover:text-slate-400'}`}>
-          <div className="relative">
-            <ListTodo size={22} />
-            {activeTasks > 0 && (
-              <span className="absolute -top-1.5 -right-2.5 text-[9px] bg-purple-500 text-white
-                rounded-full min-w-[16px] h-4 flex items-center justify-center px-1 font-bold leading-none">
-                {activeTasks > 99 ? '99+' : activeTasks}
-              </span>
-            )}
-          </div>
-          <span className="text-[10px] font-medium">Tasks</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('insights')}
-          className={`flex-1 flex flex-col items-center justify-center py-3 gap-1 transition-colors
-            ${activeTab === 'insights' ? 'text-purple-400' : 'text-slate-600 hover:text-slate-400'}`}>
-          <BarChart2 size={22} />
-          <span className="text-[10px] font-medium">Insights</span>
-        </button>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setActiveTab(t.id)}
+            className={`flex-1 flex flex-col items-center justify-center py-3 gap-1 transition-colors
+              ${activeTab === t.id ? 'text-purple-400' : 'text-slate-600 hover:text-slate-400'}`}>
+            <div className="relative">
+              <t.icon size={22} />
+              {t.badge > 0 && (
+                <span className="absolute -top-1.5 -right-2.5 text-[9px] bg-purple-500 text-white
+                  rounded-full min-w-[16px] h-4 flex items-center justify-center px-1 font-bold leading-none">
+                  {t.badge > 99 ? '99+' : t.badge}
+                </span>
+              )}
+            </div>
+            <span className="text-[10px] font-medium">{t.label}</span>
+          </button>
+        ))}
       </div>
     </nav>
   )
@@ -1268,8 +1569,8 @@ function BottomNav({ activeTab, setActiveTab, activeTasks }) {
 // ─── App ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { tasks, addTask, toggleTask, deleteTask, updateTask, toggleSubtask, clearCompleted } = useTasks()
-  const { toasts, add: addToast } = useToast()
+  const { tasks, addTask, toggleTask, deleteTask, restoreTask, updateTask, toggleSubtask, clearCompleted } = useTasks()
+  const { toasts, add: addToast, dismiss } = useToast()
 
   const [apiKey, setApiKey]       = useState(() => localStorage.getItem(AI_KEY_STORAGE) || '')
   const [showSettings, setShowSettings] = useState(false)
@@ -1285,8 +1586,10 @@ export default function App() {
   }, [])
 
   const handleDelete = useCallback((id) => {
-    deleteTask(id); addToast('Task deleted', 'error')
-  }, [deleteTask, addToast])
+    const task = tasks.find(t => t.id === id)
+    deleteTask(id)
+    if (task) addToast(`Deleted: ${task.title.slice(0, 28)}…`, 'error', () => restoreTask(task))
+  }, [tasks, deleteTask, restoreTask, addToast])
 
   const handleToggle = useCallback((id) => {
     const task = tasks.find(t => t.id === id)
@@ -1317,7 +1620,7 @@ export default function App() {
     }
   }, [filtered])
 
-  const sharedProps = { onToggle: handleToggle, onDelete: handleDelete, onUpdate: updateTask, onToggleSubtask: toggleSubtask }
+  const sharedProps = { onToggle: handleToggle, onDelete: handleDelete, onUpdate: updateTask, onToggleSubtask: toggleSubtask, apiKey, addToast }
   const completedCount = tasks.filter(t => t.completed).length
 
   return (
@@ -1393,11 +1696,14 @@ export default function App() {
           </>
         )}
 
+        {/* AI Assistant tab */}
+        {activeTab === 'ai' && <AssistantTab tasks={tasks} apiKey={apiKey} />}
+
         {/* Insights tab */}
         {activeTab === 'insights' && <InsightsDashboard tasks={tasks} />}
       </div>
 
-      <Toast toasts={toasts} />
+      <Toast toasts={toasts} dismiss={dismiss} />
       <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} activeTasks={tasks.filter(t => !t.completed).length} />
     </div>
   )
