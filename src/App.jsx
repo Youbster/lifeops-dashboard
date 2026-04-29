@@ -4,7 +4,7 @@ import {
   ChevronDown, ChevronRight, AlertTriangle, Target,
   Calendar, Clock, Lightbulb, Settings, Sparkles, Loader2, Eye, EyeOff,
   TrendingUp, BarChart2, Zap, ListTodo, ChevronUp, BookOpen, CheckSquare, Square,
-  Wand2, Send, RotateCcw, MessageSquare
+  Wand2, Send, RotateCcw, MessageSquare, Home, Flame, Trophy
 } from 'lucide-react'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -27,6 +27,24 @@ const CATEGORIES = [
 const CATEGORY_MAP = Object.fromEntries(CATEGORIES.map(c => [c.id, c]))
 const PRIORITIES = { high: '#EF4444', medium: '#F59E0B', low: '#6B7280' }
 const DURATION_LABELS = { quick: '< 5 min', '30m': '30 min', '1h': '1 hour', '2h': '2 hours', 'half-day': 'Half day' }
+
+const HABITS_KEY = 'lifeops_habits'
+const GOALS_KEY  = 'lifeops_goals'
+const BRIEF_KEY  = 'lifeops_daily_brief'
+
+const GOAL_TIMEFRAMES = [
+  { id: 'week', label: 'This week' }, { id: 'month', label: 'This month' },
+  { id: 'quarter', label: 'This quarter' }, { id: 'year', label: 'This year' },
+]
+
+const PRESET_HABITS = [
+  { emoji: '💪', name: 'Exercise' }, { emoji: '💧', name: 'Drink water' },
+  { emoji: '📚', name: 'Read' },     { emoji: '🧘', name: 'Meditate' },
+  { emoji: '😴', name: 'Sleep 8h' }, { emoji: '✍️', name: 'Journal' },
+  { emoji: '🥗', name: 'Eat healthy' }, { emoji: '🚶', name: 'Walk outside' },
+  { emoji: '📵', name: 'No phone AM' }, { emoji: '🌱', name: 'No social media' },
+]
+const HABIT_EMOJIS = ['💪','💧','📚','🧘','😴','✍️','🥗','🚶','💊','🌱','🎯','💻','🎵','🏊','🏋️','🧹','📝','🌅','🍎','🚴','⚡','🎨','🤝','💰','🎯']
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -62,6 +80,33 @@ function formatDate(dateStr) {
   if (diff < -1) return `${Math.abs(diff)}d ago`
   if (diff <= 7) return date.toLocaleDateString('en-US', { weekday: 'long' })
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+function getHabitStreak(history = {}) {
+  const today = new Date(); today.setHours(0,0,0,0)
+  const todayStr = toLocalDateStr(today)
+  const d = new Date(today)
+  if (!history[todayStr]) d.setDate(d.getDate() - 1)
+  let streak = 0
+  for (let i = 0; i < 400; i++) {
+    if (history[toLocalDateStr(d)]) { streak++; d.setDate(d.getDate() - 1) } else break
+  }
+  return streak
+}
+
+function getLast7Days() {
+  const today = new Date(); today.setHours(0,0,0,0)
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(today); d.setDate(d.getDate() - (6 - i))
+    return { d, str: toLocalDateStr(d), label: d.toLocaleDateString('en-US', { weekday: 'narrow' }) }
+  })
+}
+
+function goalProgressColor(pct) {
+  if (pct >= 75) return '#10B981'
+  if (pct >= 40) return '#8B5CF6'
+  if (pct >= 15) return '#F59E0B'
+  return '#EF4444'
 }
 
 // ─── AI Parser ───────────────────────────────────────────────────────────────
@@ -244,6 +289,42 @@ function useTasks() {
   const clearCompleted = useCallback(() => setTasks(prev => prev.filter(t => !t.completed)), [])
 
   return { tasks, addTask, toggleTask, deleteTask, restoreTask, updateTask, toggleSubtask, clearCompleted }
+}
+
+function useHabits() {
+  const [habits, setHabits] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(HABITS_KEY) || '[]') } catch { return [] }
+  })
+  useEffect(() => { localStorage.setItem(HABITS_KEY, JSON.stringify(habits)) }, [habits])
+
+  const addHabit = useCallback((data) => {
+    const h = { id: Date.now().toString(36) + Math.random().toString(36).slice(2,5), ...data, history: {}, archived: false, createdAt: new Date().toISOString() }
+    setHabits(p => [...p, h]); return h
+  }, [])
+  const toggleToday = useCallback((id) => {
+    const today = toLocalDateStr(new Date())
+    setHabits(p => p.map(h => h.id === id ? { ...h, history: { ...h.history, [today]: !h.history?.[today] } } : h))
+  }, [])
+  const removeHabit  = useCallback((id) => setHabits(p => p.filter(h => h.id !== id)), [])
+  const updateHabit  = useCallback((id, upd) => setHabits(p => p.map(h => h.id === id ? { ...h, ...upd } : h)), [])
+
+  return { habits: habits.filter(h => !h.archived), addHabit, toggleToday, removeHabit, updateHabit }
+}
+
+function useGoals() {
+  const [goals, setGoals] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(GOALS_KEY) || '[]') } catch { return [] }
+  })
+  useEffect(() => { localStorage.setItem(GOALS_KEY, JSON.stringify(goals)) }, [goals])
+
+  const addGoal    = useCallback((data) => {
+    const g = { id: Date.now().toString(36) + Math.random().toString(36).slice(2,5), ...data, progress: 0, status: 'active', createdAt: new Date().toISOString() }
+    setGoals(p => [...p, g]); return g
+  }, [])
+  const updateGoal = useCallback((id, upd) => setGoals(p => p.map(g => g.id === id ? { ...g, ...upd } : g)), [])
+  const removeGoal = useCallback((id) => setGoals(p => p.filter(g => g.id !== id)), [])
+
+  return { goals: goals.filter(g => g.status !== 'archived'), addGoal, updateGoal, removeGoal }
 }
 
 function useVoiceInput() {
@@ -688,14 +769,14 @@ async function aiEditTask(instruction, task, apiKey) {
   return resp.json()
 }
 
-async function aiAssist(messages, tasks, apiKey) {
+async function aiAssist(messages, tasks, apiKey, habits = [], goals = []) {
   const today    = new Date()
   const todayStr = toLocalDateStr(today)
   const dayName  = today.toLocaleDateString('en-US', { weekday: 'long' })
   const resp = await fetch('/api/assist', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, tasks, todayStr, dayName, apiKey }),
+    body: JSON.stringify({ messages, tasks, habits, goals, todayStr, dayName, apiKey }),
   })
   if (!resp.ok) {
     const e = await resp.json().catch(() => ({}))
@@ -1532,13 +1613,498 @@ function AssistantTab({ tasks, apiKey }) {
   )
 }
 
+// ─── Add Habit Modal ─────────────────────────────────────────────────────────
+
+function AddHabitModal({ onAdd, onClose }) {
+  const [name, setName]   = useState('')
+  const [emoji, setEmoji] = useState('💪')
+
+  const submit = () => {
+    if (!name.trim()) return
+    onAdd({ name: name.trim(), emoji })
+    onClose()
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="w-full max-w-lg bg-[#0f1117] border border-white/10 rounded-2xl p-5 animate-slide-down">
+        <div className="flex items-center justify-between mb-5">
+          <h3 className="text-white font-semibold">New Habit</h3>
+          <button onClick={onClose} className="text-slate-500 hover:text-white p-1"><X size={18} /></button>
+        </div>
+
+        {/* Preset grid */}
+        <p className="text-xs text-slate-500 mb-2">Quick pick</p>
+        <div className="grid grid-cols-5 gap-2 mb-4">
+          {PRESET_HABITS.map(p => (
+            <button key={p.name} onClick={() => { setEmoji(p.emoji); setName(p.name) }}
+              className={`flex flex-col items-center gap-1 p-2 rounded-xl border transition-all
+                ${name === p.name
+                  ? 'bg-purple-500/20 border-purple-500/40'
+                  : 'bg-white/5 border-white/5 hover:bg-white/10'}`}>
+              <span className="text-xl">{p.emoji}</span>
+              <span className="text-[10px] text-slate-400 leading-tight text-center">{p.name}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Custom */}
+        <p className="text-xs text-slate-500 mb-2">Or custom</p>
+        <div className="flex gap-1 overflow-x-auto pb-2 mb-3">
+          {HABIT_EMOJIS.map(e => (
+            <button key={e} onClick={() => setEmoji(e)}
+              className={`text-xl w-10 h-10 flex-shrink-0 rounded-xl flex items-center justify-center transition-all
+                ${emoji === e ? 'bg-purple-500/30 ring-1 ring-purple-500/50' : 'bg-white/5 hover:bg-white/10'}`}>
+              {e}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex gap-2">
+          <input value={name} onChange={e => setName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submit() }}
+            placeholder="Habit name…"
+            className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-sm
+              placeholder-slate-600 focus:outline-none focus:border-purple-500/50" />
+          <button onClick={submit} disabled={!name.trim()}
+            className="px-5 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-700 disabled:text-slate-500
+              text-white text-sm font-medium rounded-xl transition-all active:scale-95">
+            Add
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Habits Section ───────────────────────────────────────────────────────────
+
+function HabitsSection({ habits, toggleToday, addHabit, removeHabit }) {
+  const [showAdd, setShowAdd]   = useState(false)
+  const [managing, setManaging] = useState(false)
+  const todayStr = toLocalDateStr(new Date())
+  const days     = getLast7Days()
+
+  return (
+    <>
+      <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+            <Flame size={15} className="text-orange-400" /> Habits
+          </h2>
+          <div className="flex gap-2">
+            {habits.length > 0 && (
+              <button onClick={() => setManaging(m => !m)}
+                className="text-[11px] text-slate-500 hover:text-slate-300 transition-colors">
+                {managing ? 'Done' : 'Manage'}
+              </button>
+            )}
+            <button onClick={() => setShowAdd(true)}
+              className="text-[11px] bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white
+                px-2.5 py-1 rounded-lg transition-colors">
+              + Add
+            </button>
+          </div>
+        </div>
+
+        {habits.length === 0 ? (
+          <p className="text-slate-600 text-sm text-center py-3">Track daily habits to build streaks</p>
+        ) : (
+          <div className="space-y-4">
+            {habits.map(habit => {
+              const streak = getHabitStreak(habit.history)
+              const done   = !!habit.history?.[todayStr]
+              return (
+                <div key={habit.id} className="flex items-center gap-3">
+                  <button onClick={() => toggleToday(habit.id)}
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0
+                      transition-all duration-200 active:scale-90
+                      ${done
+                        ? 'bg-emerald-500/20 ring-1 ring-emerald-500/40 text-emerald-400 text-base'
+                        : 'bg-white/5 hover:bg-white/10 text-xl'}`}>
+                    {done ? <Check size={18} /> : habit.emoji}
+                  </button>
+
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className={`text-sm ${done ? 'text-slate-500 line-through' : 'text-slate-200'}`}>
+                        {habit.name}
+                      </span>
+                      {streak > 0 && (
+                        <span className="text-[11px] text-orange-400 font-medium">🔥 {streak}</span>
+                      )}
+                    </div>
+                    <div className="flex gap-1">
+                      {days.map(({ str, label }) => (
+                        <div key={str} className="flex flex-col items-center gap-0.5">
+                          <div className={`w-4 h-4 rounded-full transition-all
+                            ${habit.history?.[str]
+                              ? 'bg-emerald-500'
+                              : str === todayStr
+                                ? 'bg-white/15 ring-1 ring-white/25'
+                                : 'bg-white/5'}`} />
+                          <span className="text-[9px] text-slate-700">{label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {managing && (
+                    <button onClick={() => removeHabit(habit.id)}
+                      className="p-1.5 text-slate-600 hover:text-red-400 transition-colors flex-shrink-0">
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {showAdd && (
+        <AddHabitModal
+          onAdd={(data) => { addHabit(data); setShowAdd(false) }}
+          onClose={() => setShowAdd(false)}
+        />
+      )}
+    </>
+  )
+}
+
+// ─── Add Goal Modal ───────────────────────────────────────────────────────────
+
+function AddGoalModal({ onAdd, onClose }) {
+  const [title, setTitle]           = useState('')
+  const [emoji, setEmoji]           = useState('🎯')
+  const [timeframe, setTimeframe]   = useState('month')
+  const [description, setDescription] = useState('')
+
+  const GOAL_EMOJIS = ['🎯','💰','🏋️','📚','💻','🌍','❤️','🏠','🚗','✈️','🎓','💡','🏆','🎨','🤝','🧘','🚀','💪']
+
+  const submit = () => {
+    if (!title.trim()) return
+    onAdd({ title: title.trim(), emoji, timeframe, description: description.trim() })
+    onClose()
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="w-full max-w-lg bg-[#0f1117] border border-white/10 rounded-2xl p-5 animate-slide-down">
+        <div className="flex items-center justify-between mb-5">
+          <h3 className="text-white font-semibold">New Goal</h3>
+          <button onClick={onClose} className="text-slate-500 hover:text-white p-1"><X size={18} /></button>
+        </div>
+
+        {/* Emoji row */}
+        <p className="text-xs text-slate-500 mb-2">Pick an emoji</p>
+        <div className="flex gap-1 overflow-x-auto pb-2 mb-4">
+          {GOAL_EMOJIS.map(e => (
+            <button key={e} onClick={() => setEmoji(e)}
+              className={`text-xl w-10 h-10 flex-shrink-0 rounded-xl flex items-center justify-center transition-all
+                ${emoji === e ? 'bg-purple-500/30 ring-1 ring-purple-500/50' : 'bg-white/5 hover:bg-white/10'}`}>
+              {e}
+            </button>
+          ))}
+        </div>
+
+        <label className="block mb-3">
+          <span className="text-xs text-slate-500 mb-1.5 block">Goal title</span>
+          <input value={title} onChange={e => setTitle(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submit() }}
+            placeholder="e.g. Read 12 books, Save $5k, Learn Spanish"
+            className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-sm
+              placeholder-slate-600 focus:outline-none focus:border-purple-500/50" />
+        </label>
+
+        <div className="mb-3">
+          <span className="text-xs text-slate-500 mb-1.5 block">Timeframe</span>
+          <div className="grid grid-cols-4 gap-2">
+            {GOAL_TIMEFRAMES.map(tf => (
+              <button key={tf.id} onClick={() => setTimeframe(tf.id)}
+                className={`py-2 text-xs rounded-xl border transition-all
+                  ${timeframe === tf.id
+                    ? 'bg-purple-500/20 border-purple-500/40 text-purple-300'
+                    : 'bg-white/5 border-white/5 text-slate-400 hover:bg-white/10'}`}>
+                {tf.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <label className="block mb-5">
+          <span className="text-xs text-slate-500 mb-1.5 block">Why it matters <span className="text-slate-700">(optional)</span></span>
+          <textarea value={description} onChange={e => setDescription(e.target.value)}
+            rows={2} placeholder="Your motivation…"
+            className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-sm
+              resize-none placeholder-slate-600 focus:outline-none focus:border-purple-500/50" />
+        </label>
+
+        <button onClick={submit} disabled={!title.trim()}
+          className="w-full bg-purple-600 hover:bg-purple-500 disabled:bg-slate-700 disabled:text-slate-500
+            text-white text-sm font-medium rounded-xl py-3 transition-all active:scale-95">
+          Add Goal
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Goals Section ────────────────────────────────────────────────────────────
+
+function GoalsSection({ goals, addGoal, updateGoal, removeGoal }) {
+  const [showAdd, setShowAdd]               = useState(false)
+  const [editingProgress, setEditingProgress] = useState(null)
+
+  return (
+    <>
+      <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+            <Trophy size={15} className="text-yellow-400" /> Goals
+          </h2>
+          <button onClick={() => setShowAdd(true)}
+            className="text-[11px] bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white
+              px-2.5 py-1 rounded-lg transition-colors">
+            + Add
+          </button>
+        </div>
+
+        {goals.length === 0 ? (
+          <p className="text-slate-600 text-sm text-center py-3">Set goals and track your progress</p>
+        ) : (
+          <div className="space-y-5">
+            {goals.map(goal => {
+              const pct       = Math.min(100, Math.max(0, goal.progress || 0))
+              const color     = goalProgressColor(pct)
+              const tf        = GOAL_TIMEFRAMES.find(t => t.id === goal.timeframe)
+              const isEditing = editingProgress === goal.id
+
+              return (
+                <div key={goal.id}>
+                  <div className="flex items-start gap-3 mb-2">
+                    <span className="text-2xl flex-shrink-0">{goal.emoji}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm text-slate-200 font-medium truncate">{goal.title}</span>
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          <span className="text-xs font-bold" style={{ color }}>{pct}%</span>
+                          <button onClick={() => setEditingProgress(isEditing ? null : goal.id)}
+                            className="p-1 text-slate-600 hover:text-slate-300 transition-colors">
+                            <Pencil size={12} />
+                          </button>
+                          <button onClick={() => removeGoal(goal.id)}
+                            className="p-1 text-slate-600 hover:text-red-400 transition-colors">
+                            <X size={12} />
+                          </button>
+                        </div>
+                      </div>
+                      {tf && <span className="text-[11px] text-slate-600">{tf.label}</span>}
+                      {goal.description && (
+                        <p className="text-[11px] text-slate-500 mt-0.5 truncate">{goal.description}</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="h-2 bg-white/5 rounded-full overflow-hidden cursor-pointer"
+                    onClick={() => setEditingProgress(isEditing ? null : goal.id)}>
+                    <div className="h-full rounded-full transition-all duration-500"
+                      style={{ width: `${pct}%`, backgroundColor: color }} />
+                  </div>
+
+                  {isEditing && (
+                    <div className="mt-3 animate-slide-down">
+                      <input type="range" min={0} max={100} value={pct}
+                        onChange={e => updateGoal(goal.id, { progress: Number(e.target.value) })}
+                        className="w-full accent-purple-500"
+                      />
+                      <div className="flex justify-between text-[10px] text-slate-600 -mt-1">
+                        <span>0%</span><span>50%</span><span>100%</span>
+                      </div>
+                      {pct === 100 && (
+                        <button
+                          onClick={() => { updateGoal(goal.id, { status: 'archived' }); setEditingProgress(null) }}
+                          className="mt-2 text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors">
+                          <Check size={12} /> Mark complete & archive
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {showAdd && (
+        <AddGoalModal
+          onAdd={(data) => { addGoal(data); setShowAdd(false) }}
+          onClose={() => setShowAdd(false)}
+        />
+      )}
+    </>
+  )
+}
+
+// ─── Home Tab ─────────────────────────────────────────────────────────────────
+
+function HomeTab({ tasks, habits, goals, toggleToday, addHabit, removeHabit, addGoal, updateGoal, removeGoal, apiKey }) {
+  const todayStr = toLocalDateStr(new Date())
+  const [brief, setBrief] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(BRIEF_KEY) || 'null')
+      if (saved?.date === todayStr) return saved.text
+    } catch {}
+    return null
+  })
+  const [briefLoading, setBriefLoading] = useState(false)
+
+  const hour = new Date().getHours()
+  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
+  const dayName  = new Date().toLocaleDateString('en-US', { weekday: 'long' })
+  const dateStr  = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' })
+
+  const activeTasks  = tasks.filter(t => !t.completed)
+  const todayTasks   = activeTasks.filter(t => classifyTask(t) === 'today')
+  const overdueTasks = activeTasks.filter(t => classifyTask(t) === 'overdue')
+  const todayDone    = tasks.filter(t => t.completed && t.completedAt && isoToLocalDate(t.completedAt) === todayStr)
+  const habitsToday  = habits.filter(h => !!h.history?.[todayStr])
+  const habitsPct    = habits.length > 0 ? Math.round((habitsToday.length / habits.length) * 100) : 0
+
+  // Top-3 focus: overdue first, then today, then high-priority — deduplicated
+  const focusTasks = [...overdueTasks, ...todayTasks, ...activeTasks.filter(t => t.priority === 'high')]
+    .filter((t, i, arr) => arr.findIndex(x => x.id === t.id) === i)
+    .slice(0, 3)
+
+  const fetchBrief = async () => {
+    if (briefLoading) return
+    setBriefLoading(true)
+    try {
+      const { response } = await aiAssist(
+        [{ role: 'user', content: 'Give me a quick morning brief. What\'s my situation today? Any overdue items, what\'s due today, top priorities. Be direct and energizing. Under 100 words.' }],
+        tasks,
+        apiKey,
+        habits,
+        goals,
+      )
+      setBrief(response)
+      localStorage.setItem(BRIEF_KEY, JSON.stringify({ date: todayStr, text: response }))
+    } catch (err) {
+      setBrief(`⚠ ${err.message.slice(0, 60)}`)
+    }
+    setBriefLoading(false)
+  }
+
+  return (
+    <div className="space-y-4 animate-fade-in">
+
+      {/* Greeting card */}
+      <div className="bg-gradient-to-br from-purple-500/10 via-blue-500/5 to-transparent border border-white/10 rounded-2xl p-5">
+        <p className="text-slate-400 text-sm">{dayName}, {dateStr}</p>
+        <h2 className="text-xl font-bold text-white mt-0.5">{greeting} 👋</h2>
+
+        <div className="grid grid-cols-3 gap-3 mt-4">
+          <div className="text-center">
+            <p className="text-2xl font-bold text-white">{todayTasks.length}</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">Due today</p>
+          </div>
+          <div className="text-center">
+            <p className={`text-2xl font-bold ${overdueTasks.length > 0 ? 'text-red-400' : 'text-white'}`}>
+              {overdueTasks.length}
+            </p>
+            <p className="text-[11px] text-slate-500 mt-0.5">Overdue</p>
+          </div>
+          <div className="text-center">
+            <p className="text-2xl font-bold text-emerald-400">{todayDone.length}</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">Done today</p>
+          </div>
+        </div>
+
+        {habits.length > 0 && (
+          <div className="mt-4 pt-3 border-t border-white/5">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs text-slate-500">Today's habits</span>
+              <span className="text-xs font-semibold text-orange-400">{habitsToday.length}/{habits.length}</span>
+            </div>
+            <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+              <div className="h-full bg-orange-400 rounded-full transition-all duration-500"
+                style={{ width: `${habitsPct}%` }} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* AI Brief */}
+      <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+            <Sparkles size={14} className="text-purple-400" /> AI Brief
+          </h3>
+          <button onClick={fetchBrief} disabled={briefLoading}
+            className="text-[11px] text-purple-400 hover:text-purple-300 disabled:opacity-50
+              flex items-center gap-1 transition-colors">
+            {briefLoading ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />}
+            {brief ? 'Refresh' : 'Generate'}
+          </button>
+        </div>
+        {brief
+          ? <AiText text={brief} />
+          : briefLoading
+            ? <p className="text-xs text-slate-500 animate-pulse">Analyzing your day…</p>
+            : <p className="text-xs text-slate-600">Tap Generate for a personalized morning brief.</p>
+        }
+      </div>
+
+      {/* Today's focus */}
+      {focusTasks.length > 0 && (
+        <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+          <h3 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+            <Target size={14} className="text-blue-400" /> Today's Focus
+          </h3>
+          <div className="space-y-2">
+            {focusTasks.map((t, i) => {
+              const cat       = CATEGORY_MAP[t.category]
+              const isOverdue = classifyTask(t) === 'overdue'
+              return (
+                <div key={t.id} className="flex items-center gap-3 p-3 bg-white/5 rounded-xl">
+                  <span className="text-slate-600 font-mono text-xs w-4 flex-shrink-0">{i + 1}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-slate-200 truncate">{t.title}</p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-[10px]" style={{ color: cat?.color }}>{cat?.label}</span>
+                      {isOverdue && <span className="text-[10px] text-red-400">Overdue</span>}
+                      {t.duration && <span className="text-[10px] text-slate-600">{DURATION_LABELS[t.duration]}</span>}
+                    </div>
+                  </div>
+                  <span className="w-2 h-2 rounded-full flex-shrink-0"
+                    style={{ backgroundColor: PRIORITIES[t.priority] }} />
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Habits */}
+      <HabitsSection habits={habits} toggleToday={toggleToday} addHabit={addHabit} removeHabit={removeHabit} />
+
+      {/* Goals */}
+      <GoalsSection goals={goals} addGoal={addGoal} updateGoal={updateGoal} removeGoal={removeGoal} />
+    </div>
+  )
+}
+
 // ─── Bottom Nav ──────────────────────────────────────────────────────────────
 
 function BottomNav({ activeTab, setActiveTab, activeTasks }) {
   const tabs = [
-    { id: 'tasks',    icon: ListTodo,      label: 'Tasks',    badge: activeTasks },
-    { id: 'ai',       icon: Sparkles,      label: 'AI',       badge: 0 },
-    { id: 'insights', icon: BarChart2,     label: 'Insights', badge: 0 },
+    { id: 'home',     icon: Home,      label: 'Home',     badge: 0 },
+    { id: 'tasks',    icon: ListTodo,  label: 'Tasks',    badge: activeTasks },
+    { id: 'ai',       icon: Sparkles,  label: 'AI',       badge: 0 },
+    { id: 'insights', icon: BarChart2, label: 'Insights', badge: 0 },
   ]
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-40
@@ -1570,11 +2136,13 @@ function BottomNav({ activeTab, setActiveTab, activeTasks }) {
 
 export default function App() {
   const { tasks, addTask, toggleTask, deleteTask, restoreTask, updateTask, toggleSubtask, clearCompleted } = useTasks()
+  const { habits, addHabit, toggleToday, removeHabit, updateHabit } = useHabits()
+  const { goals, addGoal, updateGoal, removeGoal } = useGoals()
   const { toasts, add: addToast, dismiss } = useToast()
 
   const [apiKey, setApiKey]       = useState(() => localStorage.getItem(AI_KEY_STORAGE) || '')
   const [showSettings, setShowSettings] = useState(false)
-  const [activeTab, setActiveTab] = useState('tasks')
+  const [activeTab, setActiveTab] = useState('home')
   const [search, setSearch]       = useState('')
   const [activeCategory, setActiveCategory] = useState(null)
   const [statusFilter, setStatusFilter]     = useState('all')
@@ -1646,11 +2214,10 @@ export default function App() {
           <SettingsPanel apiKey={apiKey} onSave={saveApiKey} onClose={() => setShowSettings(false)} />
         )}
 
-        <QuickCapture onAdd={addTask} addToast={addToast} apiKey={apiKey} />
-
         {/* Tasks tab */}
         {activeTab === 'tasks' && (
           <>
+            <QuickCapture onAdd={addTask} addToast={addToast} apiKey={apiKey} />
             <CompactStats tasks={tasks} />
             <FilterBar
               search={search} setSearch={setSearch}
@@ -1694,6 +2261,16 @@ export default function App() {
               </div>
             )}
           </>
+        )}
+
+        {/* Home tab */}
+        {activeTab === 'home' && (
+          <HomeTab
+            tasks={tasks} habits={habits} goals={goals}
+            toggleToday={toggleToday} addHabit={addHabit} removeHabit={removeHabit}
+            addGoal={addGoal} updateGoal={updateGoal} removeGoal={removeGoal}
+            apiKey={apiKey}
+          />
         )}
 
         {/* AI Assistant tab */}

@@ -5,7 +5,7 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  const { messages, tasks, todayStr, dayName, apiKey } = req.body
+  const { messages, tasks, habits = [], goals = [], todayStr, dayName, apiKey } = req.body
   const key = process.env.OPENAI_API_KEY || apiKey
   if (!key) return res.status(400).json({ error: 'No API key.' })
 
@@ -25,6 +25,28 @@ export default async function handler(req, res) {
 
   const completedRecent = done.slice(0, 10).map(t => `✓ ${t.title}`).join('\n')
 
+  // Habits summary
+  const habitLines = habits.map(h => {
+    const streak = (() => {
+      const hist = h.history || {}
+      const d = new Date(todayStr + 'T00:00:00')
+      if (!hist[todayStr]) d.setDate(d.getDate() - 1)
+      let s = 0
+      for (let i = 0; i < 400; i++) {
+        const key = d.toISOString().slice(0, 10)
+        if (hist[key]) { s++; d.setDate(d.getDate() - 1) } else break
+      }
+      return s
+    })()
+    const doneToday = !!h.history?.[todayStr]
+    return `${h.emoji} ${h.name} — streak: ${streak} day${streak !== 1 ? 's' : ''}, today: ${doneToday ? 'done' : 'not done'}`
+  }).join('\n')
+
+  // Goals summary
+  const goalLines = goals.map(g => {
+    return `${g.emoji} ${g.title} (${g.timeframe}) — ${g.progress || 0}% complete`
+  }).join('\n')
+
   const system = `You are a smart personal productivity assistant inside LifeOps, a life task manager.
 Today is ${todayStr} (${dayName}).
 
@@ -38,7 +60,13 @@ ${taskList || '(none)'}
 RECENTLY COMPLETED:
 ${completedRecent || '(none)'}
 
-You have full context of the user's life tasks. Be their smart, direct, friendly productivity coach.
+HABITS (${habits.length} total):
+${habitLines || '(none set)'}
+
+GOALS (${goals.length} total):
+${goalLines || '(none set)'}
+
+You have full context of the user's life. Be their smart, direct, friendly productivity and life coach.
 
 BEHAVIOR:
 - Be concise and actionable — no fluff
@@ -48,6 +76,7 @@ BEHAVIOR:
 - When suggesting priorities, be specific and explain briefly why
 - For weekly reviews: structure as Wins → Needs attention → This week's focus
 - For "what to focus on today": pick 3 max with reasoning
+- For morning briefs: mention habit streak status if relevant, goal progress if relevant
 - Keep responses under 200 words unless a detailed review is requested`
 
   try {
