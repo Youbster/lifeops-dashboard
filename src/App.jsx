@@ -4,7 +4,7 @@ import {
   ChevronDown, ChevronRight, AlertTriangle, Target,
   Calendar, Clock, Lightbulb, Settings, Sparkles, Loader2, Eye, EyeOff,
   TrendingUp, BarChart2, Zap, ListTodo, ChevronUp, BookOpen, CheckSquare, Square,
-  Wand2, Send, RotateCcw, MessageSquare, Home, Flame, Trophy
+  Wand2, Send, RotateCcw, MessageSquare, Home, Flame, Trophy, Repeat
 } from 'lucide-react'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -27,6 +27,12 @@ const CATEGORIES = [
 const CATEGORY_MAP = Object.fromEntries(CATEGORIES.map(c => [c.id, c]))
 const PRIORITIES = { high: '#EF4444', medium: '#F59E0B', low: '#6B7280' }
 const DURATION_LABELS = { quick: '< 5 min', '30m': '30 min', '1h': '1 hour', '2h': '2 hours', 'half-day': 'Half day' }
+
+const REPEAT_OPTIONS = [
+  { id: 'daily',   label: 'Daily' },
+  { id: 'weekly',  label: 'Weekly' },
+  { id: 'monthly', label: 'Monthly' },
+]
 
 const HABITS_KEY = 'lifeops_habits'
 const GOALS_KEY  = 'lifeops_goals'
@@ -102,6 +108,15 @@ function getLast7Days() {
   })
 }
 
+function getNextRepeatDate(dateStr, repeat) {
+  const base = dateStr || toLocalDateStr(new Date())
+  const d = new Date(base + 'T00:00:00')
+  if (repeat === 'daily')   d.setDate(d.getDate() + 1)
+  if (repeat === 'weekly')  d.setDate(d.getDate() + 7)
+  if (repeat === 'monthly') d.setMonth(d.getMonth() + 1)
+  return toLocalDateStr(d)
+}
+
 function goalProgressColor(pct) {
   if (pct >= 75) return '#10B981'
   if (pct >= 40) return '#8B5CF6'
@@ -131,6 +146,7 @@ function validateParsed(parsed, fallbackText) {
     type:     ['todo', 'idea', 'purchase', 'follow-up', 'project'].includes(parsed.type) ? parsed.type : 'todo',
     notes:    typeof parsed.notes === 'string' ? parsed.notes.trim().slice(0, 300) : '',
     duration: validDurations.includes(parsed.duration) ? parsed.duration : null,
+    repeat:   ['daily', 'weekly', 'monthly'].includes(parsed.repeat) ? parsed.repeat : null,
     subtasks,
   }
 }
@@ -243,7 +259,12 @@ function parseNaturalInput(text) {
   if (title) title = title.charAt(0).toUpperCase() + title.slice(1)
   if (!title) title = text.trim()
 
-  return { title, category, dueDate, priority, type, notes: '', duration: null, subtasks: [] }
+  let repeat = null
+  if (/\b(every\s*day|each\s*day|daily)\b/i.test(lower))   repeat = 'daily'
+  else if (/\b(every\s*week|each\s*week|weekly)\b/i.test(lower)) repeat = 'weekly'
+  else if (/\b(every\s*month|each\s*month|monthly)\b/i.test(lower)) repeat = 'monthly'
+
+  return { title, category, dueDate, priority, type, notes: '', duration: null, repeat, subtasks: [] }
 }
 
 // ─── Hooks ───────────────────────────────────────────────────────────────────
@@ -269,9 +290,30 @@ function useTasks() {
     return task
   }, [])
 
-  const toggleTask = useCallback((id) => setTasks(prev => prev.map(t =>
-    t.id === id ? { ...t, completed: !t.completed, completedAt: !t.completed ? new Date().toISOString() : null } : t
-  )), [])
+  const toggleTask = useCallback((id) => {
+    setTasks(prev => {
+      const task = prev.find(t => t.id === id)
+      if (!task) return prev
+      const isCompleting = !task.completed
+      const updated = prev.map(t =>
+        t.id === id
+          ? { ...t, completed: isCompleting, completedAt: isCompleting ? new Date().toISOString() : null }
+          : t
+      )
+      if (isCompleting && task.repeat) {
+        const next = {
+          ...task,
+          id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+          completed: false,
+          completedAt: null,
+          createdAt: new Date().toISOString(),
+          dueDate: getNextRepeatDate(task.dueDate, task.repeat),
+        }
+        return [...updated, next]
+      }
+      return updated
+    })
+  }, [])
 
   const deleteTask  = useCallback((id) => setTasks(prev => prev.filter(t => t.id !== id)), [])
 
@@ -612,6 +654,7 @@ function EditModal({ task, onSave, onClose }) {
     type:     task.type,
     notes:    task.notes || '',
     duration: task.duration || '',
+    repeat:   task.repeat || '',
   })
   const [subtasks, setSubtasks] = useState(task.subtasks || [])
   const [newSub, setNewSub]     = useState('')
@@ -697,15 +740,25 @@ function EditModal({ task, onSave, onClose }) {
           </label>
         </div>
 
-        {/* Duration */}
-        <label className="block mb-4">
-          <span className="text-xs text-slate-500 mb-1.5 block">Estimated time</span>
-          <select value={form.duration} onChange={e => set('duration', e.target.value)}
-            style={{ backgroundColor: '#1a1d27' }} className={selectCls}>
-            <option value="">Unknown</option>
-            {Object.entries(DURATION_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-          </select>
-        </label>
+        {/* Duration + Repeat */}
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <label>
+            <span className="text-xs text-slate-500 mb-1.5 block">Estimated time</span>
+            <select value={form.duration} onChange={e => set('duration', e.target.value)}
+              style={{ backgroundColor: '#1a1d27' }} className={selectCls}>
+              <option value="">Unknown</option>
+              {Object.entries(DURATION_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          </label>
+          <label>
+            <span className="text-xs text-slate-500 mb-1.5 block">Repeats</span>
+            <select value={form.repeat} onChange={e => set('repeat', e.target.value)}
+              style={{ backgroundColor: '#1a1d27' }} className={selectCls}>
+              <option value="">Never</option>
+              {REPEAT_OPTIONS.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
+            </select>
+          </label>
+        </div>
 
         {/* Subtasks */}
         <div className="mb-5">
@@ -741,7 +794,7 @@ function EditModal({ task, onSave, onClose }) {
         </div>
 
         <button
-          onClick={() => { onSave({ ...form, dueDate: form.dueDate || null, duration: form.duration || null, subtasks }); onClose() }}
+          onClick={() => { onSave({ ...form, dueDate: form.dueDate || null, duration: form.duration || null, repeat: form.repeat || null, subtasks }); onClose() }}
           className="w-full bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium
             rounded-xl py-3 transition-all duration-200 active:scale-95">
           Save changes
@@ -943,6 +996,11 @@ function TaskCard({ task, onToggle, onDelete, onUpdate, onToggleSubtask, apiKey,
                   {task.type !== 'todo' && (
                     <span className="text-[11px] text-slate-500 bg-white/5 px-1.5 py-0.5 rounded capitalize">
                       {task.type}
+                    </span>
+                  )}
+                  {task.repeat && (
+                    <span className="text-[11px] flex items-center gap-1 text-blue-400">
+                      <Repeat size={10} /> {task.repeat}
                     </span>
                   )}
                   {subtasks.length > 0 && (
@@ -1188,7 +1246,7 @@ function StatCard({ label, value, icon: Icon, color = 'slate', sub }) {
   )
 }
 
-function InsightsDashboard({ tasks }) {
+function InsightsDashboard({ tasks, habits = [], goals = [] }) {
   const todayD   = new Date()
   todayD.setHours(0, 0, 0, 0)
   const todayStr = toLocalDateStr(todayD)
@@ -1420,6 +1478,86 @@ function InsightsDashboard({ tasks }) {
           </div>
         </div>
       </div>
+
+      {/* Habits analytics */}
+      {habits.length > 0 && (() => {
+        const last7 = getLast7Days()
+        const totalPossible = habits.length * 7
+        const totalDone = habits.reduce((sum, h) =>
+          sum + last7.filter(({ str }) => !!h.history?.[str]).length, 0)
+        const weekRate = totalPossible > 0 ? Math.round((totalDone / totalPossible) * 100) : 0
+        return (
+          <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+                <Flame size={14} className="text-orange-400" /> Habits — last 7 days
+              </h3>
+              <span className="text-sm font-bold text-orange-400">{weekRate}%</span>
+            </div>
+            <div className="h-1.5 bg-white/5 rounded-full mb-4">
+              <div className="h-full bg-orange-400 rounded-full transition-all duration-700"
+                style={{ width: `${weekRate}%` }} />
+            </div>
+            <div className="space-y-3">
+              {habits.map(habit => {
+                const streak  = getHabitStreak(habit.history)
+                const weekDone = last7.filter(({ str }) => !!habit.history?.[str]).length
+                return (
+                  <div key={habit.id}>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="text-base leading-none">{habit.emoji}</span>
+                      <span className="text-xs text-slate-300 flex-1">{habit.name}</span>
+                      {streak > 0 && <span className="text-[11px] text-orange-400">🔥 {streak}</span>}
+                      <span className="text-[11px] text-slate-500">{weekDone}/7</span>
+                    </div>
+                    <div className="flex gap-1">
+                      {last7.map(({ str }) => (
+                        <div key={str} className={`flex-1 h-2 rounded-full transition-all
+                          ${habit.history?.[str] ? 'bg-emerald-500' : 'bg-white/5'}`} />
+                      ))}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Goals analytics */}
+      {goals.length > 0 && (
+        <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+              <Trophy size={14} className="text-yellow-400" /> Goals
+            </h3>
+            <span className="text-xs text-slate-500">
+              avg {Math.round(goals.reduce((s, g) => s + (g.progress || 0), 0) / goals.length)}%
+            </span>
+          </div>
+          <div className="space-y-4">
+            {goals.map(goal => {
+              const pct   = Math.min(100, Math.max(0, goal.progress || 0))
+              const color = goalProgressColor(pct)
+              const tf    = GOAL_TIMEFRAMES.find(t => t.id === goal.timeframe)
+              return (
+                <div key={goal.id}>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span className="text-base leading-none">{goal.emoji}</span>
+                    <span className="text-xs text-slate-300 flex-1 truncate">{goal.title}</span>
+                    {tf && <span className="text-[10px] text-slate-600">{tf.label}</span>}
+                    <span className="text-xs font-bold flex-shrink-0" style={{ color }}>{pct}%</span>
+                  </div>
+                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full transition-all duration-700"
+                      style={{ width: `${pct}%`, backgroundColor: color }} />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -2097,6 +2235,44 @@ function HomeTab({ tasks, habits, goals, toggleToday, addHabit, removeHabit, add
   )
 }
 
+// ─── Floating Capture ────────────────────────────────────────────────────────
+
+function FloatingCapture({ onAdd, addToast, apiKey }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="fixed bottom-24 right-4 z-40 w-14 h-14 bg-purple-600 hover:bg-purple-500
+          text-white rounded-full shadow-lg shadow-purple-500/30 flex items-center justify-center
+          transition-all duration-200 active:scale-90 hover:scale-105">
+        <Plus size={26} />
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm"
+          onClick={(e) => { if (e.target === e.currentTarget) setOpen(false) }}>
+          <div className="w-full max-w-2xl bg-[#0f1117] border border-white/10 rounded-t-2xl p-5 pb-8 animate-slide-down">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-semibold text-white flex items-center gap-2">
+                <Sparkles size={14} className="text-purple-400" /> Capture anything
+              </span>
+              <button onClick={() => setOpen(false)} className="text-slate-500 hover:text-white p-1">
+                <X size={18} />
+              </button>
+            </div>
+            <QuickCapture
+              onAdd={(parsed) => { onAdd(parsed); setOpen(false) }}
+              addToast={addToast}
+              apiKey={apiKey}
+            />
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 // ─── Bottom Nav ──────────────────────────────────────────────────────────────
 
 function BottomNav({ activeTab, setActiveTab, activeTasks }) {
@@ -2136,7 +2312,7 @@ function BottomNav({ activeTab, setActiveTab, activeTasks }) {
 
 export default function App() {
   const { tasks, addTask, toggleTask, deleteTask, restoreTask, updateTask, toggleSubtask, clearCompleted } = useTasks()
-  const { habits, addHabit, toggleToday, removeHabit, updateHabit } = useHabits()
+  const { habits, addHabit, toggleToday, removeHabit } = useHabits()
   const { goals, addGoal, updateGoal, removeGoal } = useGoals()
   const { toasts, add: addToast, dismiss } = useToast()
 
@@ -2162,7 +2338,11 @@ export default function App() {
   const handleToggle = useCallback((id) => {
     const task = tasks.find(t => t.id === id)
     toggleTask(id)
-    addToast(task?.completed ? 'Task reopened' : '✓ Task completed!')
+    if (!task?.completed && task?.repeat) {
+      addToast(`✓ Done! Next ${task.repeat} occurrence scheduled`)
+    } else {
+      addToast(task?.completed ? 'Task reopened' : '✓ Task completed!')
+    }
   }, [tasks, toggleTask, addToast])
 
   const filtered = useMemo(() => {
@@ -2277,9 +2457,10 @@ export default function App() {
         {activeTab === 'ai' && <AssistantTab tasks={tasks} apiKey={apiKey} />}
 
         {/* Insights tab */}
-        {activeTab === 'insights' && <InsightsDashboard tasks={tasks} />}
+        {activeTab === 'insights' && <InsightsDashboard tasks={tasks} habits={habits} goals={goals} />}
       </div>
 
+      <FloatingCapture onAdd={addTask} addToast={addToast} apiKey={apiKey} />
       <Toast toasts={toasts} dismiss={dismiss} />
       <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} activeTasks={tasks.filter(t => !t.completed).length} />
     </div>

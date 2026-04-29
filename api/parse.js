@@ -23,6 +23,7 @@ Return ONLY valid JSON with these fields:
 - type: todo | idea | purchase | follow-up | project
 - notes: 1-2 sentence context note with any extra detail from the input beyond the action (e.g. who to call, what exactly to buy, why it matters). Empty string if nothing extra.
 - duration: estimated effort — "quick" (<5 min), "30m", "1h", "2h", "half-day", or null if unclear
+- repeat: "daily" | "weekly" | "monthly" | null — set when user says "every day/week/month", "daily", "weekly", "monthly", or "recurring". null for one-time tasks.
 - subtasks: for "project" type only, array of 3-5 short action strings (next steps). Empty array for non-projects.
 
 TITLE RULES:
@@ -53,7 +54,13 @@ SUBTASKS (projects only):
 Examples:
 "ok so I need to call the dentist before Friday to reschedule my appointment" →
   title: "Call dentist", dueDate: [next Thursday], priority: "medium", type: "follow-up",
-  notes: "Reschedule existing appointment", duration: "quick", subtasks: []
+  notes: "Reschedule existing appointment", duration: "quick", repeat: null, subtasks: []
+
+"pay rent every month" →
+  title: "Pay rent", category: "money", priority: "high", type: "todo", repeat: "monthly", subtasks: []
+
+"drink water every day" →
+  title: "Drink water", category: "personal", repeat: "daily", subtasks: []
 
 "I think I should start building my portfolio website this week" →
   title: "Build portfolio website", type: "project", priority: "high",
