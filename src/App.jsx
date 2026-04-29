@@ -369,9 +369,8 @@ function SettingsPanel({ apiKey, onSave, onClose }) {
       </div>
 
       <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-        Enter your Anthropic API key to enable Claude AI parsing. Once deployed to Vercel, set{' '}
-        <span className="text-slate-300 font-mono">ANTHROPIC_API_KEY</span> as an environment variable
-        for a serverless setup — no key needed in the app. Your key is stored only on this device.
+        <span className="text-green-400 font-medium">✓ AI is active</span> — the server API key is set on Vercel.
+        You can optionally enter a personal key here to override it, or leave blank. Key is stored only on this device.
       </p>
 
       <div className="relative mb-3">
@@ -461,21 +460,19 @@ function QuickCapture({ onAdd, addToast, apiKey }) {
     let usedAI = false
 
     let aiError = null
-    if (apiKey) {
-      try {
-        parsed = await parseWithAI(trimmed, apiKey)
-        usedAI = true
-      } catch (err) {
-        const msg = err.message || String(err)
-        console.error('[LifeOps AI]', msg)
-        if (msg.includes('401')) aiError = 'Invalid API key — update it in ✦ settings'
-        else if (msg.includes('429')) aiError = 'Rate limited — try again in a moment'
-        else if (msg.includes('403')) aiError = 'Key lacks permission — check Anthropic Console'
-        else if (/fetch|network|load failed|failed to/i.test(msg)) aiError = 'Network error — is your key correct?'
-        else aiError = msg.slice(0, 60)
-        parsed = parseNaturalInput(trimmed)
-      }
-    } else {
+    try {
+      parsed = await parseWithAI(trimmed, apiKey)
+      usedAI = true
+    } catch (err) {
+      const msg = err.message || String(err)
+      console.error('[LifeOps AI]', msg)
+      if (msg.includes('No API key')) {
+        // No server key and no local key — silent fallback, no toast
+      } else if (msg.includes('401')) aiError = 'Invalid API key — update it in ✦ settings'
+      else if (msg.includes('429')) aiError = 'Rate limited — try again in a moment'
+      else if (msg.includes('403')) aiError = 'Key lacks permission — check Anthropic Console'
+      else if (/fetch|network|load failed|failed to/i.test(msg)) aiError = 'Network error'
+      else aiError = msg.slice(0, 60)
       parsed = parseNaturalInput(trimmed)
     }
 
@@ -489,7 +486,7 @@ function QuickCapture({ onAdd, addToast, apiKey }) {
     inputRef.current?.focus()
   }
 
-  const hasAI = Boolean(apiKey)
+  const hasAI = true // server always has ANTHROPIC_API_KEY
 
   // Right-side padding: enough room for mic + optional AI badge
   const inputPr = isSupported ? (hasAI ? 'pr-24' : 'pr-12') : (hasAI ? 'pr-16' : 'pr-4')
