@@ -4,7 +4,8 @@ import {
   ChevronDown, ChevronRight, AlertTriangle, Target,
   Calendar, Clock, Lightbulb, Settings, Sparkles, Loader2, Eye, EyeOff,
   TrendingUp, BarChart2, Zap, ListTodo, ChevronUp, BookOpen, CheckSquare, Square,
-  Wand2, Send, RotateCcw, MessageSquare, Home, Flame, Trophy, Repeat
+  Wand2, Send, RotateCcw, MessageSquare, Home, Flame, Trophy, Repeat,
+  Star, Award, Lock
 } from 'lucide-react'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -32,6 +33,35 @@ const REPEAT_OPTIONS = [
   { id: 'daily',   label: 'Daily' },
   { id: 'weekly',  label: 'Weekly' },
   { id: 'monthly', label: 'Monthly' },
+]
+
+const XP_KEY           = 'lifeops_xp'
+const ACHIEVEMENTS_KEY = 'lifeops_achievements'
+
+const LEVELS = [
+  { level: 1, name: 'Starter',    xpRequired: 0    },
+  { level: 2, name: 'Hustler',    xpRequired: 100  },
+  { level: 3, name: 'Builder',    xpRequired: 300  },
+  { level: 4, name: 'Achiever',   xpRequired: 600  },
+  { level: 5, name: 'Pro',        xpRequired: 1000 },
+  { level: 6, name: 'Elite',      xpRequired: 1500 },
+  { level: 7, name: 'Master',     xpRequired: 2200 },
+  { level: 8, name: 'Legend',     xpRequired: 3200 },
+]
+
+const ACHIEVEMENTS_LIST = [
+  { id: 'first_task',  icon: '🎯', title: 'First Step',           desc: 'Complete your first task',         xp: 15  },
+  { id: 'tasks_10',    icon: '✅', title: 'Getting Things Done',  desc: 'Complete 10 tasks',                xp: 30  },
+  { id: 'tasks_50',    icon: '⚡', title: 'Productivity Machine', desc: 'Complete 50 tasks',                xp: 75  },
+  { id: 'first_habit', icon: '💪', title: 'Creature of Habit',    desc: 'Check in a habit for the first time', xp: 10 },
+  { id: 'streak_7',    icon: '🔥', title: 'Week Warrior',         desc: '7-day habit streak',               xp: 35  },
+  { id: 'streak_30',   icon: '🏆', title: 'Unstoppable',          desc: '30-day habit streak',              xp: 100 },
+  { id: 'first_goal',  icon: '🌟', title: 'Dream Big',            desc: 'Set your first goal',              xp: 10  },
+  { id: 'goal_done',   icon: '🎖️', title: 'Goal Crusher',         desc: 'Complete a goal (100%)',           xp: 75  },
+  { id: 'speed_run',   icon: '🚀', title: 'Speed Run',            desc: 'Complete 5 tasks in one day',      xp: 40  },
+  { id: 'high_five',   icon: '🎯', title: 'High Priorities',      desc: 'Complete 5 high-priority tasks',   xp: 30  },
+  { id: 'all_habits',  icon: '💯', title: 'Perfect Day',          desc: 'Check all habits in one day',      xp: 25  },
+  { id: 'level_5',     icon: '👑', title: 'Going Pro',            desc: 'Reach Level 5',                    xp: 50  },
 ]
 
 const HABITS_KEY = 'lifeops_habits'
@@ -115,6 +145,31 @@ function getNextRepeatDate(dateStr, repeat) {
   if (repeat === 'weekly')  d.setDate(d.getDate() + 7)
   if (repeat === 'monthly') d.setMonth(d.getMonth() + 1)
   return toLocalDateStr(d)
+}
+
+function calcTaskXP(task) {
+  let xp = 10
+  if (task.priority === 'high')     xp += 10
+  if (task.priority === 'low')      xp -= 3
+  if (task.duration === 'half-day') xp += 10
+  if (task.duration === '2h')       xp += 6
+  if (task.duration === '1h')       xp += 4
+  if (task.duration === '30m')      xp += 2
+  if ((task.subtasks || []).some(s => s.done)) xp += 5
+  return Math.max(5, xp)
+}
+
+function getLevel(totalXP) {
+  let lvl = LEVELS[0]
+  for (const l of LEVELS) {
+    if (totalXP >= l.xpRequired) lvl = l
+    else break
+  }
+  const next     = LEVELS.find(l => l.xpRequired > totalXP)
+  const xpIn     = totalXP - lvl.xpRequired
+  const xpNeeded = next ? next.xpRequired - lvl.xpRequired : 0
+  const pct      = next ? Math.min(100, Math.round((xpIn / xpNeeded) * 100)) : 100
+  return { ...lvl, next, xpIn, xpNeeded, pct }
 }
 
 function goalProgressColor(pct) {
@@ -367,6 +422,32 @@ function useGoals() {
   const removeGoal = useCallback((id) => setGoals(p => p.filter(g => g.id !== id)), [])
 
   return { goals: goals.filter(g => g.status !== 'archived'), addGoal, updateGoal, removeGoal }
+}
+
+function useXP() {
+  const [total, setTotal] = useState(() => {
+    try { return Number(localStorage.getItem(XP_KEY) || '0') } catch { return 0 }
+  })
+  useEffect(() => { localStorage.setItem(XP_KEY, String(total)) }, [total])
+  const addXP = useCallback((amount) => setTotal(p => p + amount), [])
+  return { total, addXP }
+}
+
+function useAchievements() {
+  const [unlocked, setUnlocked] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(ACHIEVEMENTS_KEY) || '[]') } catch { return [] }
+  })
+  const unlockedRef = useRef(unlocked)
+  useEffect(() => {
+    unlockedRef.current = unlocked
+    localStorage.setItem(ACHIEVEMENTS_KEY, JSON.stringify(unlocked))
+  }, [unlocked])
+  const tryUnlock = useCallback((id) => {
+    if (unlockedRef.current.includes(id)) return false
+    setUnlocked(prev => [...prev, id])
+    return true
+  }, [])
+  return { unlocked, tryUnlock }
 }
 
 function useVoiceInput() {
@@ -1246,7 +1327,7 @@ function StatCard({ label, value, icon: Icon, color = 'slate', sub }) {
   )
 }
 
-function InsightsDashboard({ tasks, habits = [], goals = [] }) {
+function InsightsDashboard({ tasks, habits = [], goals = [], unlocked = [] }) {
   const todayD   = new Date()
   todayD.setHours(0, 0, 0, 0)
   const todayStr = toLocalDateStr(todayD)
@@ -1558,6 +1639,9 @@ function InsightsDashboard({ tasks, habits = [], goals = [] }) {
           </div>
         </div>
       )}
+
+      {/* Achievements */}
+      <AchievementsSection unlocked={unlocked} />
     </div>
   )
 }
@@ -2089,7 +2173,7 @@ function GoalsSection({ goals, addGoal, updateGoal, removeGoal }) {
 
 // ─── Home Tab ─────────────────────────────────────────────────────────────────
 
-function HomeTab({ tasks, habits, goals, toggleToday, addHabit, removeHabit, addGoal, updateGoal, removeGoal, apiKey }) {
+function HomeTab({ tasks, habits, goals, toggleToday, addHabit, removeHabit, addGoal, updateGoal, removeGoal, apiKey, totalXP }) {
   const todayStr = toLocalDateStr(new Date())
   const [brief, setBrief] = useState(() => {
     try {
@@ -2138,6 +2222,9 @@ function HomeTab({ tasks, habits, goals, toggleToday, addHabit, removeHabit, add
 
   return (
     <div className="space-y-4 animate-fade-in">
+
+      {/* Level card */}
+      <LevelCard totalXP={totalXP} />
 
       {/* Greeting card */}
       <div className="bg-gradient-to-br from-purple-500/10 via-blue-500/5 to-transparent border border-white/10 rounded-2xl p-5">
@@ -2235,6 +2322,98 @@ function HomeTab({ tasks, habits, goals, toggleToday, addHabit, removeHabit, add
   )
 }
 
+// ─── Level Card ──────────────────────────────────────────────────────────────
+
+function LevelCard({ totalXP }) {
+  const info = getLevel(totalXP)
+  return (
+    <div className="bg-gradient-to-r from-purple-500/10 via-amber-500/5 to-transparent border border-amber-500/20 rounded-2xl p-4 mb-4">
+      <div className="flex items-center justify-between mb-2.5">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-600/40 to-amber-500/20 flex items-center justify-center">
+            <Star size={18} className="text-amber-400" fill="currentColor" />
+          </div>
+          <div>
+            <p className="text-white font-bold text-sm">Level {info.level} · {info.name}</p>
+            <p className="text-xs text-slate-500">{totalXP.toLocaleString()} XP earned</p>
+          </div>
+        </div>
+        {info.next && (
+          <div className="text-right">
+            <p className="text-xs text-amber-400 font-medium">{(info.xpNeeded - info.xpIn).toLocaleString()} XP</p>
+            <p className="text-[10px] text-slate-600">to Level {info.next.level}</p>
+          </div>
+        )}
+      </div>
+      <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-700 bg-gradient-to-r from-purple-500 to-amber-400"
+          style={{ width: `${info.pct}%` }} />
+      </div>
+    </div>
+  )
+}
+
+// ─── Level Up Modal ───────────────────────────────────────────────────────────
+
+function LevelUpModal({ levelInfo, onClose }) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 4000)
+    return () => clearTimeout(t)
+  }, [onClose])
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 backdrop-blur-md"
+      onClick={onClose}>
+      <div className="text-center px-8 animate-slide-down">
+        <div className="text-7xl mb-5 animate-bounce">⭐</div>
+        <p className="text-amber-400 text-xs font-bold uppercase tracking-[0.2em] mb-2">Level Up!</p>
+        <h2 className="text-6xl font-black text-white mb-2">{levelInfo.level}</h2>
+        <p className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-amber-400 bg-clip-text text-transparent">
+          {levelInfo.name}
+        </p>
+        <p className="text-slate-500 text-sm mt-8">Tap to continue</p>
+      </div>
+    </div>
+  )
+}
+
+// ─── Achievements Section ─────────────────────────────────────────────────────
+
+function AchievementsSection({ unlocked }) {
+  const earnedXP = ACHIEVEMENTS_LIST.filter(a => unlocked.includes(a.id)).reduce((s, a) => s + a.xp, 0)
+  return (
+    <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+          <Award size={14} className="text-amber-400" /> Achievements
+        </h3>
+        <span className="text-xs text-slate-500">
+          {unlocked.length}/{ACHIEVEMENTS_LIST.length} · {earnedXP} XP earned
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {ACHIEVEMENTS_LIST.map(a => {
+          const done = unlocked.includes(a.id)
+          return (
+            <div key={a.id}
+              className={`p-3 rounded-xl border transition-all ${
+                done
+                  ? 'bg-purple-500/10 border-purple-500/25'
+                  : 'bg-white/[0.02] border-white/5 opacity-45'
+              }`}>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-xl leading-none">{done ? a.icon : '🔒'}</span>
+                <span className="text-xs font-semibold text-white truncate">{a.title}</span>
+              </div>
+              <p className="text-[10px] text-slate-500 leading-tight mb-1">{a.desc}</p>
+              <p className="text-[10px] text-amber-400 font-medium">+{a.xp} XP</p>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ─── Floating Capture ────────────────────────────────────────────────────────
 
 function FloatingCapture({ onAdd, addToast, apiKey }) {
@@ -2315,10 +2494,24 @@ export default function App() {
   const { habits, addHabit, toggleToday, removeHabit } = useHabits()
   const { goals, addGoal, updateGoal, removeGoal } = useGoals()
   const { toasts, add: addToast, dismiss } = useToast()
+  const { total: totalXP, addXP } = useXP()
+  const { unlocked, tryUnlock } = useAchievements()
 
-  const [apiKey, setApiKey]       = useState(() => localStorage.getItem(AI_KEY_STORAGE) || '')
+  const [apiKey, setApiKey]             = useState(() => localStorage.getItem(AI_KEY_STORAGE) || '')
   const [showSettings, setShowSettings] = useState(false)
-  const [activeTab, setActiveTab] = useState('home')
+  const [activeTab, setActiveTab]       = useState('home')
+  const [levelUpTarget, setLevelUpTarget] = useState(null)
+
+  // Detect level-up
+  const prevLevelRef = useRef(null)
+  useEffect(() => {
+    const cur = getLevel(totalXP).level
+    if (prevLevelRef.current !== null && cur > prevLevelRef.current) {
+      setLevelUpTarget(getLevel(totalXP))
+      if (cur >= 5 && tryUnlock('level_5')) setTimeout(() => addToast('👑 Going Pro! +50 XP'), 800)
+    }
+    prevLevelRef.current = cur
+  }, [totalXP])
   const [search, setSearch]       = useState('')
   const [activeCategory, setActiveCategory] = useState(null)
   const [statusFilter, setStatusFilter]     = useState('all')
@@ -2338,12 +2531,55 @@ export default function App() {
   const handleToggle = useCallback((id) => {
     const task = tasks.find(t => t.id === id)
     toggleTask(id)
-    if (!task?.completed && task?.repeat) {
-      addToast(`✓ Done! Next ${task.repeat} occurrence scheduled`)
+    if (!task?.completed) {
+      const xp = calcTaskXP(task)
+      addXP(xp)
+      addToast(task.repeat ? `✓ Done! +${xp} XP — next ${task.repeat} scheduled` : `✓ Done! +${xp} XP`)
+      const todayStr     = toLocalDateStr(new Date())
+      const doneSoFar    = tasks.filter(t => t.completed).length + 1
+      const highDone     = tasks.filter(t => t.completed && t.priority === 'high').length + (task.priority === 'high' ? 1 : 0)
+      const todayDone    = tasks.filter(t => t.completed && t.completedAt && isoToLocalDate(t.completedAt) === todayStr).length + 1
+      if (doneSoFar === 1  && tryUnlock('first_task')) setTimeout(() => { addXP(15); addToast('🎯 First Step! +15 XP') }, 700)
+      if (doneSoFar === 10 && tryUnlock('tasks_10'))  setTimeout(() => { addXP(30); addToast('✅ Getting Things Done! +30 XP') }, 700)
+      if (doneSoFar === 50 && tryUnlock('tasks_50'))  setTimeout(() => { addXP(75); addToast('⚡ Productivity Machine! +75 XP') }, 700)
+      if (highDone  === 5  && tryUnlock('high_five')) setTimeout(() => { addXP(30); addToast('🎯 High Priorities! +30 XP') }, 700)
+      if (todayDone === 5  && tryUnlock('speed_run')) setTimeout(() => { addXP(40); addToast('🚀 Speed Run! +40 XP') }, 700)
     } else {
-      addToast(task?.completed ? 'Task reopened' : '✓ Task completed!')
+      addToast('Task reopened')
     }
-  }, [tasks, toggleTask, addToast])
+  }, [tasks, toggleTask, addXP, addToast, tryUnlock])
+
+  const handleToggleHabit = useCallback((id) => {
+    const todayStr = toLocalDateStr(new Date())
+    const habit    = habits.find(h => h.id === id)
+    const wasDone  = !!habit?.history?.[todayStr]
+    toggleToday(id)
+    if (!wasDone && habit) {
+      const streak  = getHabitStreak({ ...habit.history, [todayStr]: true })
+      const xp      = 5 + (streak >= 30 ? 10 : streak >= 7 ? 5 : 0)
+      addXP(xp)
+      addToast(`💪 ${habit.name} +${xp} XP`)
+      if (tryUnlock('first_habit'))                      setTimeout(() => { addXP(10);  addToast('💪 Creature of Habit! +10 XP')  }, 700)
+      if (streak >= 7  && tryUnlock('streak_7'))         setTimeout(() => { addXP(35);  addToast('🔥 Week Warrior! +35 XP')       }, 700)
+      if (streak >= 30 && tryUnlock('streak_30'))        setTimeout(() => { addXP(100); addToast('🏆 Unstoppable! +100 XP')       }, 700)
+      const allDone = habits.every(h => h.id === id ? true : !!h.history?.[todayStr])
+      if (allDone && habits.length > 1 && tryUnlock('all_habits')) setTimeout(() => { addXP(25); addToast('💯 Perfect Day! +25 XP') }, 700)
+    }
+  }, [habits, toggleToday, addXP, addToast, tryUnlock])
+
+  const handleAddGoal = useCallback((data) => {
+    addGoal(data)
+    if (goals.length === 0 && tryUnlock('first_goal')) setTimeout(() => { addXP(10); addToast('🌟 Dream Big! +10 XP') }, 700)
+  }, [goals, addGoal, addXP, addToast, tryUnlock])
+
+  const handleUpdateGoal = useCallback((id, upd) => {
+    updateGoal(id, upd)
+    if (upd.progress === 100) {
+      addXP(20)
+      addToast('🎯 Goal at 100%! +20 XP')
+      if (tryUnlock('goal_done')) setTimeout(() => { addXP(75); addToast('🎖️ Goal Crusher! +75 XP') }, 700)
+    }
+  }, [updateGoal, addXP, addToast, tryUnlock])
 
   const filtered = useMemo(() => {
     let r = tasks
@@ -2447,9 +2683,9 @@ export default function App() {
         {activeTab === 'home' && (
           <HomeTab
             tasks={tasks} habits={habits} goals={goals}
-            toggleToday={toggleToday} addHabit={addHabit} removeHabit={removeHabit}
-            addGoal={addGoal} updateGoal={updateGoal} removeGoal={removeGoal}
-            apiKey={apiKey}
+            toggleToday={handleToggleHabit} addHabit={addHabit} removeHabit={removeHabit}
+            addGoal={handleAddGoal} updateGoal={handleUpdateGoal} removeGoal={removeGoal}
+            apiKey={apiKey} totalXP={totalXP}
           />
         )}
 
@@ -2457,9 +2693,10 @@ export default function App() {
         {activeTab === 'ai' && <AssistantTab tasks={tasks} apiKey={apiKey} />}
 
         {/* Insights tab */}
-        {activeTab === 'insights' && <InsightsDashboard tasks={tasks} habits={habits} goals={goals} />}
+        {activeTab === 'insights' && <InsightsDashboard tasks={tasks} habits={habits} goals={goals} unlocked={unlocked} />}
       </div>
 
+      {levelUpTarget && <LevelUpModal levelInfo={levelUpTarget} onClose={() => setLevelUpTarget(null)} />}
       <FloatingCapture onAdd={addTask} addToast={addToast} apiKey={apiKey} />
       <Toast toasts={toasts} dismiss={dismiss} />
       <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} activeTasks={tasks.filter(t => !t.completed).length} />
