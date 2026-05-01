@@ -6,6 +6,10 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+/* iOS safe area utilities */
+.safe-top    { padding-top:    env(safe-area-inset-top, 0px) }
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px) }
+
 body {
   margin: 0;
   padding: 0;
@@ -85,6 +89,14 @@ input, textarea, button {
 
 .toast-exit {
   animation: toast-out 0.25s ease-in forwards;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 .recording-dot {

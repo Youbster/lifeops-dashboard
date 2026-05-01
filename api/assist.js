@@ -3,9 +3,13 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
   if (req.method === 'OPTIONS') return res.status(200).end()
+
+  const allowed = ['https://lifeops-dashboard-pearl.vercel.app', 'http://localhost:5173', 'http://localhost:4173']
+  if (!allowed.includes(req.headers.origin)) return res.status(403).json({ error: 'Forbidden' })
+
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  const { messages, tasks, habits = [], goals = [], todayStr, dayName, apiKey } = req.body
+  const { messages, tasks, habits = [], goals = [], calendarEvents = [], todayStr, dayName, apiKey, timezone = 'UTC', systemSuffix = '' } = req.body
   const key = process.env.OPENAI_API_KEY || apiKey
   if (!key) return res.status(400).json({ error: 'No API key.' })
 
@@ -47,6 +51,15 @@ export default async function handler(req, res) {
     return `${g.emoji} ${g.title} (${g.timeframe}) — ${g.progress || 0}% complete`
   }).join('\n')
 
+  // Calendar summary
+  const calLines = calendarEvents.map(ev => {
+    if (!ev.start?.dateTime) return `• ${ev.summary || 'Untitled'} (all day)`
+    const fmt = { hour: 'numeric', minute: '2-digit', timeZone: timezone }
+    const start = new Date(ev.start.dateTime).toLocaleTimeString('en-US', fmt)
+    const end   = new Date(ev.end.dateTime).toLocaleTimeString('en-US', fmt)
+    return `• ${start}–${end}: ${ev.summary || 'Untitled'}${ev.location ? ` @ ${ev.location}` : ''}`
+  }).join('\n')
+
   const system = `You are a smart personal productivity assistant inside LifeOps, a life task manager.
 Today is ${todayStr} (${dayName}).
 
@@ -66,7 +79,10 @@ ${habitLines || '(none set)'}
 GOALS (${goals.length} total):
 ${goalLines || '(none set)'}
 
-You have full context of the user's life. Be their smart, direct, friendly productivity and life coach.
+TODAY'S CALENDAR (${calendarEvents.length} events):
+${calLines || '(no events today)'}
+
+You have full context of the user's life including their calendar. Be their smart, direct, friendly productivity and life coach.
 
 BEHAVIOR:
 - Be concise and actionable — no fluff
@@ -75,9 +91,10 @@ BEHAVIOR:
 - Address the user as "you" not "the user"
 - When suggesting priorities, be specific and explain briefly why
 - For weekly reviews: structure as Wins → Needs attention → This week's focus
-- For "what to focus on today": pick 3 max with reasoning
-- For morning briefs: mention habit streak status if relevant, goal progress if relevant
-- Keep responses under 200 words unless a detailed review is requested`
+- For "what to focus on today": pick 3 max with reasoning, factor in their calendar
+- For morning briefs: mention key meetings, free blocks, habit streaks, and top 2-3 tasks
+- If they have back-to-back meetings, suggest what to do in free gaps
+- Keep responses under 200 words unless a detailed review is requested${systemSuffix}`
 
   try {
     const upstream = await fetch('https://api.openai.com/v1/chat/completions', {

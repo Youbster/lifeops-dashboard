@@ -3,6 +3,10 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
   if (req.method === 'OPTIONS') return res.status(200).end()
+
+  const allowed = ['https://lifeops-dashboard-pearl.vercel.app', 'http://localhost:5173', 'http://localhost:4173']
+  if (!allowed.includes(req.headers.origin)) return res.status(403).json({ error: 'Forbidden' })
+
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   const { instruction, task, todayStr, dayName, apiKey } = req.body

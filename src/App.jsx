@@ -5,8 +5,10 @@ import {
   Calendar, Clock, Lightbulb, Settings, Sparkles, Loader2, Eye, EyeOff,
   TrendingUp, BarChart2, Zap, ListTodo, ChevronUp, BookOpen, CheckSquare, Square,
   Wand2, Send, RotateCcw, MessageSquare, Home, Flame, Trophy, Repeat,
-  Star, Award, Lock
+  Star, Award, Lock, LogIn, LogOut, Cloud, CloudOff, RefreshCw,
+  DollarSign, CreditCard, PiggyBank, Wallet, TrendingDown, FileText, Upload, Percent, Euro
 } from 'lucide-react'
+import { supabase } from './supabase'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -67,6 +69,35 @@ const ACHIEVEMENTS_LIST = [
 const HABITS_KEY = 'lifeops_habits'
 const GOALS_KEY  = 'lifeops_goals'
 const BRIEF_KEY  = 'lifeops_daily_brief'
+const FINANCE_KEY = 'lifeops_finance'
+
+const DEFAULT_FINANCE = {
+  salary: { net: 0, brut: 0 },
+  subscriptions: [],
+  expenses: [],
+}
+
+const SUB_PERIODS = [
+  { id: 'monthly',    label: 'Monthly' },
+  { id: 'yearly',     label: 'Yearly' },
+  { id: 'weekly',     label: 'Weekly' },
+  { id: 'quarterly',  label: 'Quarterly' },
+]
+
+const SAVINGS_VEHICLES = [
+  { id: 'lep',        name: 'LEP',              rate: 4.0,   cap: 7700,   emoji: '⭐',
+    desc: 'Best rate in France. For net salary ≤ €2,200/mo. Priority #1.' },
+  { id: 'livret_a',   name: 'Livret A',          rate: 3.0,   cap: 22950,  emoji: '🏦',
+    desc: 'Liquid, guaranteed, tax-free. Perfect emergency fund.' },
+  { id: 'pea',        name: 'PEA',               rate: null,  cap: 150000, emoji: '📈',
+    desc: 'Invest in EU stocks. 0% tax on gains after 5 years.' },
+  { id: 'per',        name: 'PER',               rate: null,  cap: null,   emoji: '🏖️',
+    desc: 'Pension savings. Deductible from taxable income.' },
+  { id: 'assurance',  name: 'Assurance-vie',      rate: null,  cap: null,   emoji: '🛡️',
+    desc: 'Flexible envelope. Advantageous after 8 years & inheritance.' },
+  { id: 'prime',      name: "Prime d'activité",   rate: null,  cap: null,   emoji: '💶',
+    desc: 'CAF benefit for workers. Free money — check eligibility.' },
+]
 
 const GOAL_TIMEFRAMES = [
   { id: 'week', label: 'This week' }, { id: 'month', label: 'This month' },
@@ -138,6 +169,18 @@ function getLast7Days() {
   })
 }
 
+function fmtMoney(n) {
+  return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(n || 0)
+}
+
+function toMonthly(amount, period) {
+  const a = amount || 0
+  if (period === 'yearly')    return a / 12
+  if (period === 'weekly')    return a * 52 / 12
+  if (period === 'quarterly') return a / 3
+  return a // monthly
+}
+
 function getNextRepeatDate(dateStr, repeat) {
   const base = dateStr || toLocalDateStr(new Date())
   const d = new Date(base + 'T00:00:00')
@@ -177,6 +220,35 @@ function goalProgressColor(pct) {
   if (pct >= 40) return '#8B5CF6'
   if (pct >= 15) return '#F59E0B'
   return '#EF4444'
+}
+
+// ─── Supabase Row Converters ──────────────────────────────────────────────────
+
+function taskToRow(t, uid) {
+  return { id: t.id, user_id: uid, title: t.title, category: t.category, due_date: t.dueDate,
+    priority: t.priority, type: t.type, notes: t.notes, duration: t.duration, repeat: t.repeat,
+    subtasks: t.subtasks, completed: t.completed, completed_at: t.completedAt, created_at: t.createdAt }
+}
+function rowToTask(r) {
+  return { id: r.id, title: r.title, category: r.category, dueDate: r.due_date,
+    priority: r.priority, type: r.type, notes: r.notes, duration: r.duration, repeat: r.repeat,
+    subtasks: r.subtasks || [], completed: r.completed, completedAt: r.completed_at, createdAt: r.created_at }
+}
+function habitToRow(h, uid) {
+  return { id: h.id, user_id: uid, name: h.name, emoji: h.emoji, history: h.history,
+    archived: h.archived, created_at: h.createdAt }
+}
+function rowToHabit(r) {
+  return { id: r.id, name: r.name, emoji: r.emoji, history: r.history || {},
+    archived: r.archived, createdAt: r.created_at }
+}
+function goalToRow(g, uid) {
+  return { id: g.id, user_id: uid, title: g.title, emoji: g.emoji, timeframe: g.timeframe,
+    description: g.description, progress: g.progress, status: g.status, created_at: g.createdAt }
+}
+function rowToGoal(r) {
+  return { id: r.id, title: r.title, emoji: r.emoji, timeframe: r.timeframe,
+    description: r.description, progress: r.progress || 0, status: r.status, createdAt: r.created_at }
 }
 
 // ─── AI Parser ───────────────────────────────────────────────────────────────
@@ -324,26 +396,64 @@ function parseNaturalInput(text) {
 
 // ─── Hooks ───────────────────────────────────────────────────────────────────
 
-function useTasks() {
+// Helper: fire-and-forget Supabase write with error logging
+function dbWrite(promise) {
+  promise.then(({ error }) => { if (error) console.error('[sync]', error.message) })
+}
+
+function useTasks(userId) {
   const [tasks, setTasks] = useState(() => {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]') } catch { return [] }
   })
 
+  // Load from Supabase (or localStorage if not logged in)
+  const loadFromCloud = useCallback(async () => {
+    if (!userId || !supabase) {
+      try { setTasks(JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')) } catch {}
+      return
+    }
+    const { data, error } = await supabase
+      .from('tasks').select('*').eq('user_id', userId).order('created_at', { ascending: false })
+    if (error) { console.error('[sync] tasks fetch failed:', error.message); return }
+    if (data && data.length > 0) {
+      setTasks(data.map(rowToTask))
+    } else {
+      // First login: migrate localStorage → Supabase
+      const local = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
+      if (local.length > 0) {
+        setTasks(local)
+        dbWrite(supabase.from('tasks').insert(local.map(t => taskToRow(t, userId))))
+      }
+    }
+  }, [userId])
+
+  useEffect(() => { loadFromCloud() }, [loadFromCloud])
+
+  // Always keep localStorage in sync (as offline cache) regardless of login state
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks)) } catch {}
   }, [tasks])
+
+  // Upload any local tasks missing from Supabase (recovery after offline edits)
+  const uploadMissing = useCallback(async () => {
+    if (!userId || !supabase) return 0
+    const { data } = await supabase.from('tasks').select('id').eq('user_id', userId)
+    const cloudIds = new Set((data || []).map(r => r.id))
+    const missing = tasks.filter(t => !cloudIds.has(t.id))
+    if (missing.length > 0)
+      dbWrite(supabase.from('tasks').upsert(missing.map(t => taskToRow(t, userId))))
+    return missing.length
+  }, [userId, tasks])
 
   const addTask = useCallback((parsed) => {
     const task = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-      ...parsed,
-      completed: false,
-      completedAt: null,
-      createdAt: new Date().toISOString(),
+      ...parsed, completed: false, completedAt: null, createdAt: new Date().toISOString(),
     }
     setTasks(prev => [task, ...prev])
+    if (userId && supabase) dbWrite(supabase.from('tasks').insert(taskToRow(task, userId)))
     return task
-  }, [])
+  }, [userId])
 
   const toggleTask = useCallback((id) => {
     setTasks(prev => {
@@ -355,99 +465,438 @@ function useTasks() {
           ? { ...t, completed: isCompleting, completedAt: isCompleting ? new Date().toISOString() : null }
           : t
       )
+      const toggled = updated.find(t => t.id === id)
+      if (userId && supabase) dbWrite(supabase.from('tasks').update({ completed: toggled.completed, completed_at: toggled.completedAt }).eq('id', id))
       if (isCompleting && task.repeat) {
         const next = {
           ...task,
           id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-          completed: false,
-          completedAt: null,
-          createdAt: new Date().toISOString(),
+          completed: false, completedAt: null, createdAt: new Date().toISOString(),
           dueDate: getNextRepeatDate(task.dueDate, task.repeat),
         }
+        if (userId && supabase) dbWrite(supabase.from('tasks').insert(taskToRow(next, userId)))
         return [...updated, next]
       }
       return updated
     })
-  }, [])
+  }, [userId])
 
-  const deleteTask  = useCallback((id) => setTasks(prev => prev.filter(t => t.id !== id)), [])
+  const deleteTask = useCallback((id) => {
+    setTasks(prev => prev.filter(t => t.id !== id))
+    if (userId && supabase) dbWrite(supabase.from('tasks').delete().eq('id', id))
+  }, [userId])
 
-  const updateTask  = useCallback((id, updates) => setTasks(prev => prev.map(t =>
-    t.id === id ? { ...t, ...updates } : t
-  )), [])
+  const updateTask = useCallback((id, updates) => {
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t))
+    if (userId && supabase) {
+      const dbUp = {}
+      if ('title'    in updates) dbUp.title       = updates.title
+      if ('category' in updates) dbUp.category    = updates.category
+      if ('dueDate'  in updates) dbUp.due_date    = updates.dueDate
+      if ('priority' in updates) dbUp.priority    = updates.priority
+      if ('type'     in updates) dbUp.type        = updates.type
+      if ('notes'    in updates) dbUp.notes       = updates.notes
+      if ('duration' in updates) dbUp.duration    = updates.duration
+      if ('repeat'   in updates) dbUp.repeat      = updates.repeat
+      if ('subtasks' in updates) dbUp.subtasks    = updates.subtasks
+      if ('completed'   in updates) dbUp.completed    = updates.completed
+      if ('completedAt' in updates) dbUp.completed_at = updates.completedAt
+      dbWrite(supabase.from('tasks').update(dbUp).eq('id', id))
+    }
+  }, [userId])
 
-  const toggleSubtask = useCallback((taskId, subtaskId) => setTasks(prev => prev.map(t =>
-    t.id === taskId
-      ? { ...t, subtasks: (t.subtasks || []).map(s => s.id === subtaskId ? { ...s, done: !s.done } : s) }
-      : t
-  )), [])
+  const toggleSubtask = useCallback((taskId, subtaskId) => {
+    setTasks(prev => {
+      const updated = prev.map(t =>
+        t.id === taskId
+          ? { ...t, subtasks: (t.subtasks || []).map(s => s.id === subtaskId ? { ...s, done: !s.done } : s) }
+          : t
+      )
+      if (userId && supabase) {
+        const task = updated.find(t => t.id === taskId)
+        if (task) dbWrite(supabase.from('tasks').update({ subtasks: task.subtasks }).eq('id', taskId))
+      }
+      return updated
+    })
+  }, [userId])
 
-  const restoreTask   = useCallback((task) => setTasks(prev => [task, ...prev]), [])
-  const clearCompleted = useCallback(() => setTasks(prev => prev.filter(t => !t.completed)), [])
+  const restoreTask = useCallback((task) => {
+    setTasks(prev => [task, ...prev])
+    if (userId && supabase) dbWrite(supabase.from('tasks').insert(taskToRow(task, userId)))
+  }, [userId])
 
-  return { tasks, addTask, toggleTask, deleteTask, restoreTask, updateTask, toggleSubtask, clearCompleted }
+  const clearCompleted = useCallback(() => {
+    setTasks(prev => {
+      const ids = prev.filter(t => t.completed).map(t => t.id)
+      if (userId && supabase && ids.length) dbWrite(supabase.from('tasks').delete().in('id', ids))
+      return prev.filter(t => !t.completed)
+    })
+  }, [userId])
+
+  return { tasks, addTask, toggleTask, deleteTask, restoreTask, updateTask, toggleSubtask, clearCompleted, loadFromCloud, uploadMissing }
 }
 
-function useHabits() {
+function useHabits(userId) {
   const [habits, setHabits] = useState(() => {
     try { return JSON.parse(localStorage.getItem(HABITS_KEY) || '[]') } catch { return [] }
   })
-  useEffect(() => { localStorage.setItem(HABITS_KEY, JSON.stringify(habits)) }, [habits])
+
+  const loadFromCloud = useCallback(async () => {
+    if (!userId || !supabase) {
+      try { setHabits(JSON.parse(localStorage.getItem(HABITS_KEY) || '[]')) } catch {}
+      return
+    }
+    const { data, error } = await supabase.from('habits').select('*').eq('user_id', userId)
+    if (error) { console.error('[sync] habits fetch failed:', error.message); return }
+    if (data && data.length > 0) {
+      setHabits(data.map(rowToHabit))
+    } else {
+      const local = JSON.parse(localStorage.getItem(HABITS_KEY) || '[]')
+      if (local.length > 0) {
+        setHabits(local)
+        dbWrite(supabase.from('habits').insert(local.map(h => habitToRow(h, userId))))
+      }
+    }
+  }, [userId])
+
+  useEffect(() => { loadFromCloud() }, [loadFromCloud])
+  useEffect(() => { try { localStorage.setItem(HABITS_KEY, JSON.stringify(habits)) } catch {} }, [habits])
 
   const addHabit = useCallback((data) => {
     const h = { id: Date.now().toString(36) + Math.random().toString(36).slice(2,5), ...data, history: {}, archived: false, createdAt: new Date().toISOString() }
-    setHabits(p => [...p, h]); return h
-  }, [])
+    setHabits(p => [...p, h])
+    if (userId && supabase) dbWrite(supabase.from('habits').insert(habitToRow(h, userId)))
+    return h
+  }, [userId])
+
   const toggleToday = useCallback((id) => {
     const today = toLocalDateStr(new Date())
-    setHabits(p => p.map(h => h.id === id ? { ...h, history: { ...h.history, [today]: !h.history?.[today] } } : h))
-  }, [])
-  const removeHabit  = useCallback((id) => setHabits(p => p.filter(h => h.id !== id)), [])
-  const updateHabit  = useCallback((id, upd) => setHabits(p => p.map(h => h.id === id ? { ...h, ...upd } : h)), [])
+    setHabits(p => {
+      const updated = p.map(h => h.id === id ? { ...h, history: { ...h.history, [today]: !h.history?.[today] } } : h)
+      if (userId && supabase) {
+        const habit = updated.find(h => h.id === id)
+        if (habit) dbWrite(supabase.from('habits').update({ history: habit.history }).eq('id', id))
+      }
+      return updated
+    })
+  }, [userId])
 
-  return { habits: habits.filter(h => !h.archived), addHabit, toggleToday, removeHabit, updateHabit }
+  const removeHabit = useCallback((id) => {
+    setHabits(p => p.filter(h => h.id !== id))
+    if (userId && supabase) dbWrite(supabase.from('habits').delete().eq('id', id))
+  }, [userId])
+
+  const updateHabit = useCallback((id, upd) => {
+    setHabits(p => p.map(h => h.id === id ? { ...h, ...upd } : h))
+    if (userId && supabase) dbWrite(supabase.from('habits').update(upd).eq('id', id))
+  }, [userId])
+
+  return { habits: habits.filter(h => !h.archived), addHabit, toggleToday, removeHabit, updateHabit, loadFromCloud }
 }
 
-function useGoals() {
+function useGoals(userId) {
   const [goals, setGoals] = useState(() => {
     try { return JSON.parse(localStorage.getItem(GOALS_KEY) || '[]') } catch { return [] }
   })
-  useEffect(() => { localStorage.setItem(GOALS_KEY, JSON.stringify(goals)) }, [goals])
 
-  const addGoal    = useCallback((data) => {
+  const loadFromCloud = useCallback(async () => {
+    if (!userId || !supabase) {
+      try { setGoals(JSON.parse(localStorage.getItem(GOALS_KEY) || '[]')) } catch {}
+      return
+    }
+    const { data, error } = await supabase.from('goals').select('*').eq('user_id', userId)
+    if (error) { console.error('[sync] goals fetch failed:', error.message); return }
+    if (data && data.length > 0) {
+      setGoals(data.map(rowToGoal))
+    } else {
+      const local = JSON.parse(localStorage.getItem(GOALS_KEY) || '[]')
+      if (local.length > 0) {
+        setGoals(local)
+        dbWrite(supabase.from('goals').insert(local.map(g => goalToRow(g, userId))))
+      }
+    }
+  }, [userId])
+
+  useEffect(() => { loadFromCloud() }, [loadFromCloud])
+  useEffect(() => { try { localStorage.setItem(GOALS_KEY, JSON.stringify(goals)) } catch {} }, [goals])
+
+  const addGoal = useCallback((data) => {
     const g = { id: Date.now().toString(36) + Math.random().toString(36).slice(2,5), ...data, progress: 0, status: 'active', createdAt: new Date().toISOString() }
-    setGoals(p => [...p, g]); return g
-  }, [])
-  const updateGoal = useCallback((id, upd) => setGoals(p => p.map(g => g.id === id ? { ...g, ...upd } : g)), [])
-  const removeGoal = useCallback((id) => setGoals(p => p.filter(g => g.id !== id)), [])
+    setGoals(p => [...p, g])
+    if (userId && supabase) dbWrite(supabase.from('goals').insert(goalToRow(g, userId)))
+    return g
+  }, [userId])
 
-  return { goals: goals.filter(g => g.status !== 'archived'), addGoal, updateGoal, removeGoal }
+  const updateGoal = useCallback((id, upd) => {
+    setGoals(p => p.map(g => g.id === id ? { ...g, ...upd } : g))
+    if (userId && supabase) dbWrite(supabase.from('goals').update(upd).eq('id', id))
+  }, [userId])
+
+  const removeGoal = useCallback((id) => {
+    setGoals(p => p.filter(g => g.id !== id))
+    if (userId && supabase) dbWrite(supabase.from('goals').delete().eq('id', id))
+  }, [userId])
+
+  return { goals: goals.filter(g => g.status !== 'archived'), addGoal, updateGoal, removeGoal, loadFromCloud }
 }
 
-function useXP() {
+function useFinance(userId) {
+  const [finance, setFinance] = useState(() => {
+    try { return { ...DEFAULT_FINANCE, ...JSON.parse(localStorage.getItem(FINANCE_KEY) || '{}') } }
+    catch { return { ...DEFAULT_FINANCE } }
+  })
+
+  useEffect(() => {
+    if (!userId || !supabase) return
+    supabase.from('finance').select('data').eq('user_id', userId).maybeSingle()
+      .then(({ data }) => { if (data?.data) setFinance(prev => ({ ...DEFAULT_FINANCE, ...prev, ...data.data })) })
+  }, [userId])
+
+  const persist = useCallback((updated) => {
+    try { localStorage.setItem(FINANCE_KEY, JSON.stringify(updated)) } catch {}
+    if (userId && supabase) {
+      dbWrite(supabase.from('finance').upsert({ user_id: userId, data: updated, updated_at: new Date().toISOString() }, { onConflict: 'user_id' }))
+    }
+  }, [userId])
+
+  const updateSalary = useCallback((s) => {
+    setFinance(prev => { const n = { ...prev, salary: s }; persist(n); return n })
+  }, [persist])
+
+  const addSubscription = useCallback((sub) => {
+    setFinance(prev => {
+      const n = { ...prev, subscriptions: [...(prev.subscriptions||[]), { id: Date.now().toString(36) + Math.random().toString(36).slice(2,4), ...sub }] }
+      persist(n); return n
+    })
+  }, [persist])
+
+  const removeSubscription = useCallback((id) => {
+    setFinance(prev => {
+      const n = { ...prev, subscriptions: (prev.subscriptions||[]).filter(s => s.id !== id) }
+      persist(n); return n
+    })
+  }, [persist])
+
+  const updateSubscription = useCallback((id, upd) => {
+    setFinance(prev => {
+      const n = { ...prev, subscriptions: (prev.subscriptions||[]).map(s => s.id === id ? { ...s, ...upd } : s) }
+      persist(n); return n
+    })
+  }, [persist])
+
+  const addExpense = useCallback((exp) => {
+    setFinance(prev => {
+      const n = { ...prev, expenses: [...(prev.expenses||[]), { id: Date.now().toString(36) + Math.random().toString(36).slice(2,4), ...exp }] }
+      persist(n); return n
+    })
+  }, [persist])
+
+  const removeExpense = useCallback((id) => {
+    setFinance(prev => {
+      const n = { ...prev, expenses: (prev.expenses||[]).filter(e => e.id !== id) }
+      persist(n); return n
+    })
+  }, [persist])
+
+  const importData = useCallback((patch) => {
+    setFinance(prev => { const n = { ...prev, ...patch }; persist(n); return n })
+  }, [persist])
+
+  return { finance, updateSalary, addSubscription, removeSubscription, updateSubscription, addExpense, removeExpense, importData }
+}
+
+function useXP(userId) {
   const [total, setTotal] = useState(() => {
     try { return Number(localStorage.getItem(XP_KEY) || '0') } catch { return 0 }
   })
-  useEffect(() => { localStorage.setItem(XP_KEY, String(total)) }, [total])
+
+  useEffect(() => {
+    if (!userId || !supabase) return
+    supabase.from('user_progress').select('total_xp').eq('user_id', userId).maybeSingle()
+      .then(({ data }) => { if (data) setTotal(data.total_xp) })
+  }, [userId])
+
+  useEffect(() => {
+    if (!userId) {
+      localStorage.setItem(XP_KEY, String(total))
+    } else if (supabase && total > 0) {
+      supabase.from('user_progress').upsert({ user_id: userId, total_xp: total, updated_at: new Date().toISOString() }, { onConflict: 'user_id' })
+    }
+  }, [total, userId])
+
   const addXP = useCallback((amount) => setTotal(p => p + amount), [])
   return { total, addXP }
 }
 
-function useAchievements() {
+function useAchievements(userId) {
   const [unlocked, setUnlocked] = useState(() => {
     try { return JSON.parse(localStorage.getItem(ACHIEVEMENTS_KEY) || '[]') } catch { return [] }
   })
   const unlockedRef = useRef(unlocked)
+
+  useEffect(() => {
+    if (!userId || !supabase) return
+    supabase.from('user_progress').select('unlocked_achievements').eq('user_id', userId).maybeSingle()
+      .then(({ data }) => {
+        if (data?.unlocked_achievements) {
+          setUnlocked(data.unlocked_achievements)
+          unlockedRef.current = data.unlocked_achievements
+        }
+      })
+  }, [userId])
+
   useEffect(() => {
     unlockedRef.current = unlocked
-    localStorage.setItem(ACHIEVEMENTS_KEY, JSON.stringify(unlocked))
-  }, [unlocked])
+    if (!userId) {
+      localStorage.setItem(ACHIEVEMENTS_KEY, JSON.stringify(unlocked))
+    } else if (supabase) {
+      supabase.from('user_progress').upsert({ user_id: userId, unlocked_achievements: unlocked, updated_at: new Date().toISOString() }, { onConflict: 'user_id' })
+    }
+  }, [unlocked, userId])
+
   const tryUnlock = useCallback((id) => {
     if (unlockedRef.current.includes(id)) return false
     setUnlocked(prev => [...prev, id])
     return true
   }, [])
   return { unlocked, tryUnlock }
+}
+
+const GTOKEN_KEY = 'lifeops_google_token'
+
+function useAuth() {
+  const [session, setSession] = useState(null)
+  const [authLoading, setAuthLoading] = useState(true)
+
+  // With implicit flow, provider_token is in the URL hash on the redirect landing
+  // Extract and save it immediately before Supabase clears the hash
+  const extractHashToken = () => {
+    try {
+      const hash = window.location.hash
+      if (hash && hash.includes('provider_token')) {
+        const params = new URLSearchParams(hash.replace(/^#/, ''))
+        const pt = params.get('provider_token')
+        if (pt) { localStorage.setItem(GTOKEN_KEY, pt); return pt }
+      }
+    } catch {}
+    return null
+  }
+
+  const patchSession = (s) => {
+    if (!s) return s
+    // Persist provider_token when present
+    if (s.provider_token) {
+      localStorage.setItem(GTOKEN_KEY, s.provider_token)
+      return s
+    }
+    // Re-attach cached token if session lost it after refresh
+    const cached = localStorage.getItem(GTOKEN_KEY)
+    if (cached) return { ...s, provider_token: cached }
+    return s
+  }
+
+  useEffect(() => {
+    if (!supabase) { setAuthLoading(false); return }
+    // Extract token from hash immediately on load (implicit flow redirect)
+    extractHashToken()
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(patchSession(session)); setAuthLoading(false)
+    })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, s) => {
+      if (!s) localStorage.removeItem(GTOKEN_KEY)
+      setSession(patchSession(s))
+    })
+    return () => subscription.unsubscribe()
+  }, [])
+
+  const signIn = useCallback(() => supabase?.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: window.location.origin,
+      scopes: 'https://www.googleapis.com/auth/calendar.readonly',
+      queryParams: { access_type: 'offline', prompt: 'consent' },
+    },
+  }), [])
+
+  const signOut = useCallback(() => supabase?.auth.signOut(), [])
+
+  return { session, authLoading, signIn, signOut, userId: session?.user?.id ?? null }
+}
+
+function useCalendar(session) {
+  const [todayEvents, setTodayEvents] = useState([])
+  const [calLoading, setCalLoading]   = useState(false)
+  const [calError, setCalError]       = useState(null) // null | {type, message}
+  const token = session?.provider_token
+
+  const fetchEvents = useCallback(async (dateStr) => {
+    if (!token) return []
+    const d    = new Date(dateStr + 'T00:00:00')
+    const next = new Date(d); next.setDate(next.getDate() + 1)
+    try {
+      const params = new URLSearchParams({
+        timeMin: d.toISOString(), timeMax: next.toISOString(),
+        singleEvents: 'true', orderBy: 'startTime', maxResults: '20',
+      })
+      const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) {
+        let message = `HTTP ${res.status}`
+        try {
+          const body = await res.json()
+          message = body?.error?.message || body?.error || message
+        } catch {}
+        const type = (res.status === 401 || res.status === 403) ? 'auth' : 'network'
+        if (type === 'auth') try { localStorage.removeItem('lifeops_google_token') } catch {}
+        setCalError({ type, message })
+        return []
+      }
+      setCalError(null)
+      const data = await res.json()
+      return data.items || []
+    } catch (e) { setCalError({ type: 'network', message: e.message }); return [] }
+  }, [token])
+
+  const refetchToday = useCallback(() => {
+    if (!token) return
+    setCalLoading(true)
+    fetchEvents(toLocalDateStr(new Date())).then(evts => {
+      setTodayEvents(evts); setCalLoading(false)
+    })
+  }, [token, fetchEvents])
+
+  useEffect(() => {
+    if (!token) return
+    setCalError(null)
+    setCalLoading(true)
+    fetchEvents(toLocalDateStr(new Date())).then(evts => {
+      setTodayEvents(evts); setCalLoading(false)
+    })
+  }, [token, fetchEvents])
+
+  return { todayEvents, calLoading, calError, fetchEvents, refetchToday }
+}
+
+function getFreeSlots(events, durationMins = 30) {
+  const now       = new Date()
+  const startDay  = new Date(); startDay.setHours(8, 0, 0, 0)
+  const endDay    = new Date(); endDay.setHours(20, 0, 0, 0)
+  const cursor0   = now > startDay ? now : startDay
+  const timed     = events
+    .filter(e => e.start?.dateTime)
+    .map(e => ({ start: new Date(e.start.dateTime), end: new Date(e.end.dateTime) }))
+    .sort((a, b) => a.start - b.start)
+  const slots = []
+  let cursor = cursor0
+  for (const ev of timed) {
+    if (ev.start > cursor && (ev.start - cursor) / 60000 >= durationMins)
+      slots.push({ start: new Date(cursor), end: new Date(ev.start) })
+    if (ev.end > cursor) cursor = ev.end
+  }
+  if (cursor < endDay && (endDay - cursor) / 60000 >= durationMins)
+    slots.push({ start: new Date(cursor), end: new Date(endDay) })
+  return slots
 }
 
 function useVoiceInput() {
@@ -574,7 +1023,7 @@ function useSwipeGesture(onSwipeLeft, onSwipeRight) {
 
 // ─── Settings Panel ───────────────────────────────────────────────────────────
 
-function SettingsPanel({ apiKey, onSave, onClose }) {
+function SettingsPanel({ apiKey, onSave, onClose, session, onSignIn, onSignOut, onSyncNow, onUploadLocal }) {
   const [draft, setDraft] = useState(apiKey)
   const [show, setShow]   = useState(false)
 
@@ -622,6 +1071,53 @@ function SettingsPanel({ apiKey, onSave, onClose }) {
           </button>
         )}
       </div>
+
+      {supabase && (
+        <div className="mt-4 pt-4 border-t border-white/10">
+          <div className="flex items-center gap-2 mb-3">
+            <Cloud size={14} className="text-purple-400" />
+            <span className="text-xs font-semibold text-white">Cloud Sync</span>
+          </div>
+          {session ? (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between bg-white/5 rounded-xl px-3 py-2.5">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-7 h-7 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-xs font-bold text-white">
+                    {session.user.email[0].toUpperCase()}
+                  </div>
+                  <div>
+                    <p className="text-xs text-white font-medium truncate max-w-[160px]">{session.user.email}</p>
+                    <p className="text-[10px] text-green-400">● Connected</p>
+                  </div>
+                </div>
+                <button onClick={onSignOut} className="flex items-center gap-1 text-xs text-slate-500 hover:text-red-400 transition-colors">
+                  <LogOut size={12} /> Sign out
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={onSyncNow}
+                  className="flex items-center justify-center gap-1.5 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20
+                    text-blue-400 text-xs rounded-xl py-2 transition-all active:scale-95">
+                  <RefreshCw size={12} /> Pull from cloud
+                </button>
+                <button onClick={onUploadLocal}
+                  className="flex items-center justify-center gap-1.5 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20
+                    text-purple-400 text-xs rounded-xl py-2 transition-all active:scale-95">
+                  <Cloud size={12} /> Push local data
+                </button>
+              </div>
+              <p className="text-[10px] text-slate-600 text-center">Use "Push" if tasks added offline aren't in cloud</p>
+            </div>
+          ) : (
+            <button onClick={onSignIn}
+              className="w-full flex items-center justify-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10
+                text-white text-sm rounded-xl py-2.5 transition-all duration-200 active:scale-95">
+              <LogIn size={15} className="text-purple-400" />
+              Sign in with Google for cloud sync
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -903,14 +1399,15 @@ async function aiEditTask(instruction, task, apiKey) {
   return resp.json()
 }
 
-async function aiAssist(messages, tasks, apiKey, habits = [], goals = []) {
+async function aiAssist(messages, tasks, apiKey, habits = [], goals = [], calendarEvents = []) {
   const today    = new Date()
   const todayStr = toLocalDateStr(today)
   const dayName  = today.toLocaleDateString('en-US', { weekday: 'long' })
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
   const resp = await fetch('/api/assist', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, tasks, habits, goals, todayStr, dayName, apiKey }),
+    body: JSON.stringify({ messages, tasks, habits, goals, calendarEvents, todayStr, dayName, apiKey, timezone }),
   })
   if (!resp.ok) {
     const e = await resp.json().catch(() => ({}))
@@ -1686,7 +2183,7 @@ const QUICK_PROMPTS = [
   { label: 'What am I forgetting?', text: 'Looking at my tasks, is there anything that seems neglected, risky, or that I might be forgetting?' },
 ]
 
-function AssistantTab({ tasks, apiKey }) {
+function AssistantTab({ tasks, habits, goals, apiKey, calendarEvents }) {
   const [messages, setMessages]   = useState([])
   const [input, setInput]         = useState('')
   const [loading, setLoading]     = useState(false)
@@ -1708,8 +2205,7 @@ function AssistantTab({ tasks, apiKey }) {
       const history = [...messages, userMsg]
       const { response } = await aiAssist(
         history.map(m => ({ role: m.role, content: m.content })),
-        tasks,
-        apiKey,
+        tasks, apiKey, habits, goals, calendarEvents,
       )
       setMessages(prev => [...prev, { role: 'assistant', content: response }])
     } catch (err) {
@@ -1717,7 +2213,7 @@ function AssistantTab({ tasks, apiKey }) {
     }
     setLoading(false)
     setTimeout(() => inputRef.current?.focus(), 100)
-  }, [input, loading, messages, tasks, apiKey])
+  }, [input, loading, messages, tasks, habits, goals, apiKey, calendarEvents])
 
   const activeTasks = tasks.filter(t => !t.completed)
   const overdue = activeTasks.filter(t => classifyTask(t) === 'overdue')
@@ -1729,8 +2225,9 @@ function AssistantTab({ tasks, apiKey }) {
       <div className="flex items-center gap-2 mb-4 px-1">
         <Sparkles size={13} className="text-purple-400" />
         <span className="text-xs text-slate-500">
-          Knows your {activeTasks.length} active tasks
+          Knows your {activeTasks.length} tasks
           {overdue.length > 0 && <span className="text-red-400 ml-1">· {overdue.length} overdue</span>}
+          {calendarEvents.length > 0 && <span className="text-blue-400 ml-1">· {calendarEvents.length} events today</span>}
         </span>
         {messages.length > 0 && (
           <button onClick={() => setMessages([])}
@@ -2173,7 +2670,88 @@ function GoalsSection({ goals, addGoal, updateGoal, removeGoal }) {
 
 // ─── Home Tab ─────────────────────────────────────────────────────────────────
 
-function HomeTab({ tasks, habits, goals, toggleToday, addHabit, removeHabit, addGoal, updateGoal, removeGoal, apiKey, totalXP }) {
+function CalendarStrip({ events, loading, hasToken, calError, onReconnect, onRefresh }) {
+  if (!loading && !hasToken && !calError) return null
+
+  const now = new Date()
+  const hasError = !!calError
+
+  const formatTime = (iso) =>
+    new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+
+  return (
+    <div className={`bg-white/5 border rounded-2xl p-5 ${hasError ? 'border-red-500/20' : 'border-white/10'}`}>
+      <div className="flex items-center gap-2 mb-3">
+        <Calendar size={14} className={hasError ? 'text-red-400' : 'text-blue-400'} />
+        <h3 className="text-sm font-semibold text-slate-300">Today's Schedule</h3>
+        {!hasError && !loading && (
+          <button onClick={onRefresh} title="Refresh calendar"
+            className="ml-auto text-slate-600 hover:text-slate-400 transition-colors">
+            <RefreshCw size={12} />
+          </button>
+        )}
+        {!hasError && !loading && (
+          <span className="text-[10px] text-slate-600">{events.length} event{events.length !== 1 ? 's' : ''}</span>
+        )}
+      </div>
+
+      {loading ? (
+        <p className="text-xs text-slate-500 animate-pulse">Loading calendar…</p>
+      ) : calError?.type === 'auth' ? (
+        <div className="py-2 space-y-1.5">
+          <p className="text-xs text-red-400 font-medium">Calendar error: {calError.message}</p>
+          <button onClick={onReconnect}
+            className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1.5 transition-colors">
+            <RefreshCw size={11} /> Reconnect Google Calendar
+          </button>
+        </div>
+      ) : calError?.type === 'network' ? (
+        <div className="py-2 space-y-1.5">
+          <p className="text-xs text-slate-500">Network error: {calError.message}</p>
+          <button onClick={onRefresh}
+            className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1.5 transition-colors">
+            <RefreshCw size={11} /> Retry
+          </button>
+        </div>
+      ) : !events.length ? (
+        <p className="text-xs text-slate-600 text-center py-2">No events today — enjoy the free day 🎉</p>
+      ) : (
+        <div className="space-y-1.5">
+          {events.map(ev => {
+            const isAllDay  = !ev.start?.dateTime
+            const start     = isAllDay ? null : new Date(ev.start.dateTime)
+            const end       = isAllDay ? null : new Date(ev.end.dateTime)
+            const isPast    = end ? end < now : false
+            const isCurrent = start && end ? start <= now && now <= end : false
+
+            return (
+              <div key={ev.id}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all
+                  ${isCurrent ? 'bg-blue-500/15 border border-blue-500/30' : 'bg-white/5'}
+                  ${isPast ? 'opacity-40' : ''}`}>
+                <div className="w-16 flex-shrink-0 text-right">
+                  {isAllDay
+                    ? <span className="text-[10px] text-slate-500">All day</span>
+                    : <><p className="text-xs font-medium text-blue-300">{formatTime(ev.start.dateTime)}</p>
+                       <p className="text-[10px] text-slate-500">{formatTime(ev.end.dateTime)}</p></>
+                  }
+                </div>
+                <div className={`w-0.5 h-8 rounded-full flex-shrink-0 ${isCurrent ? 'bg-blue-400' : 'bg-white/10'}`} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-slate-200 truncate">{ev.summary || 'Untitled'}</p>
+                  {ev.location && <p className="text-[10px] text-slate-500 truncate">{ev.location}</p>}
+                </div>
+                {isCurrent && <span className="text-[10px] text-blue-400 font-medium flex-shrink-0">Now</span>}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function HomeTab({ tasks, habits, goals, finance, toggleToday, addHabit, removeHabit, addGoal, updateGoal, removeGoal, apiKey, totalXP, calendarEvents, calLoading, calError, hasToken, onCalReconnect, onCalRefresh }) {
   const todayStr = toLocalDateStr(new Date())
   const [brief, setBrief] = useState(() => {
     try {
@@ -2205,12 +2783,12 @@ function HomeTab({ tasks, habits, goals, toggleToday, addHabit, removeHabit, add
     if (briefLoading) return
     setBriefLoading(true)
     try {
+      const calCtx = calendarEvents.length
+        ? ` I have ${calendarEvents.length} calendar event(s) today.`
+        : ''
       const { response } = await aiAssist(
-        [{ role: 'user', content: 'Give me a quick morning brief. What\'s my situation today? Any overdue items, what\'s due today, top priorities. Be direct and energizing. Under 100 words.' }],
-        tasks,
-        apiKey,
-        habits,
-        goals,
+        [{ role: 'user', content: `Give me a quick morning brief. What's my situation today? Any overdue items, what's due today, top priorities, key meetings.${calCtx} Be direct and energizing. Under 120 words.` }],
+        tasks, apiKey, habits, goals, calendarEvents,
       )
       setBrief(response)
       localStorage.setItem(BRIEF_KEY, JSON.stringify({ date: todayStr, text: response }))
@@ -2225,6 +2803,9 @@ function HomeTab({ tasks, habits, goals, toggleToday, addHabit, removeHabit, add
 
       {/* Level card */}
       <LevelCard totalXP={totalXP} />
+
+      {/* CEO Score */}
+      <CeoScoreCard tasks={tasks} habits={habits} finance={finance} />
 
       {/* Greeting card */}
       <div className="bg-gradient-to-br from-purple-500/10 via-blue-500/5 to-transparent border border-white/10 rounded-2xl p-5">
@@ -2261,6 +2842,10 @@ function HomeTab({ tasks, habits, goals, toggleToday, addHabit, removeHabit, add
           </div>
         )}
       </div>
+
+      {/* Calendar Strip */}
+      <CalendarStrip events={calendarEvents} loading={calLoading} hasToken={!!hasToken}
+        calError={calError} onReconnect={onCalReconnect} onRefresh={onCalRefresh} />
 
       {/* AI Brief */}
       <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
@@ -2454,12 +3039,638 @@ function FloatingCapture({ onAdd, addToast, apiKey }) {
 
 // ─── Bottom Nav ──────────────────────────────────────────────────────────────
 
+// ─── CEO Score Card ──────────────────────────────────────────────────────────
+
+function CeoScoreCard({ tasks, habits, finance }) {
+  const todayStr = toLocalDateStr(new Date())
+  const completed  = tasks.filter(t => t.completed).length
+  const total      = tasks.length
+  const opsScore   = total > 0 ? Math.round((completed / total) * 100) : 0
+
+  const netSalary  = finance?.salary?.net || 0
+  const totalSubs  = (finance?.subscriptions || []).reduce((s, sub) => s + toMonthly(sub.amount, sub.period), 0)
+  const totalExp   = (finance?.expenses || []).reduce((s, e) => s + (e.amount || 0), 0)
+  const disposable = netSalary - totalSubs - totalExp
+  const finScore   = netSalary > 0 ? Math.max(0, Math.min(100, Math.round((disposable / netSalary) * 100))) : 0
+
+  const habitsToday = habits.filter(h => !!h.history?.[todayStr]).length
+  const habitPct    = habits.length > 0 ? Math.round((habitsToday / habits.length) * 100) : 0
+
+  const overall = Math.round((opsScore + (netSalary > 0 ? finScore : opsScore) + habitPct) / (netSalary > 0 ? 3 : 2))
+
+  const ScoreMeter = ({ label, score, color }) => (
+    <div className="flex flex-col items-center gap-1.5">
+      <div className="relative w-14 h-14">
+        <svg viewBox="0 0 56 56" className="w-full h-full -rotate-90">
+          <circle cx="28" cy="28" r="22" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="5" />
+          <circle cx="28" cy="28" r="22" fill="none" stroke={color} strokeWidth="5"
+            strokeDasharray={`${(score / 100) * 138.2} 138.2`} strokeLinecap="round" />
+        </svg>
+        <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white">{score}</span>
+      </div>
+      <span className="text-[10px] text-slate-500">{label}</span>
+    </div>
+  )
+
+  return (
+    <div className="bg-gradient-to-br from-slate-800/60 to-slate-900/60 border border-white/10 rounded-2xl p-4 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+          <Trophy size={14} className="text-amber-400" /> CEO Score
+        </h3>
+        <div className="flex items-center gap-1.5">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-amber-500/30 to-purple-500/20 flex items-center justify-center">
+            <span className="text-sm font-black text-amber-400">{overall}</span>
+          </div>
+          <span className="text-[10px] text-slate-500">Overall</span>
+        </div>
+      </div>
+      <div className="flex justify-around">
+        <ScoreMeter label="Operations" score={opsScore}  color="#8B5CF6" />
+        <ScoreMeter label="Habits"     score={habitPct}  color="#F59E0B" />
+        {netSalary > 0 && <ScoreMeter label="Finance"  score={finScore}  color="#10B981" />}
+      </div>
+      <div className="mt-3 pt-3 border-t border-white/5">
+        <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+          <div className="h-full rounded-full bg-gradient-to-r from-purple-500 via-amber-500 to-emerald-500 transition-all duration-700"
+            style={{ width: `${overall}%` }} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Finance Forms ────────────────────────────────────────────────────────────
+
+function AddSubForm({ onAdd, onClose }) {
+  const [name, setName]     = useState('')
+  const [amount, setAmount] = useState('')
+  const [period, setPeriod] = useState('monthly')
+  const [cat, setCat]       = useState('Streaming')
+
+  const cats = ['Streaming','Software','Fitness','Music','News','Gaming','Utilities','Other']
+
+  const submit = (e) => {
+    e.preventDefault()
+    if (!name || !amount) return
+    onAdd({ name: name.trim(), amount: parseFloat(amount), period, category: cat })
+    onClose()
+  }
+  return (
+    <form onSubmit={submit} className="bg-[#0f1117] border border-white/10 rounded-2xl p-4 space-y-3">
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-sm font-semibold text-white">Add subscription</span>
+        <button type="button" onClick={onClose} className="text-slate-500 hover:text-white p-1"><X size={16}/></button>
+      </div>
+      <input value={name} onChange={e => setName(e.target.value)} placeholder="Name (Netflix, Spotify…)"
+        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-600 outline-none focus:border-purple-500/50" />
+      <div className="grid grid-cols-2 gap-2">
+        <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount €"
+          min="0" step="0.01"
+          className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-600 outline-none focus:border-purple-500/50" />
+        <select value={period} onChange={e => setPeriod(e.target.value)}
+          className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-purple-500/50">
+          {SUB_PERIODS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </select>
+      </div>
+      <select value={cat} onChange={e => setCat(e.target.value)}
+        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-purple-500/50">
+        {cats.map(c => <option key={c} value={c}>{c}</option>)}
+      </select>
+      <button type="submit" className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-semibold rounded-xl transition-colors">
+        Add Subscription
+      </button>
+    </form>
+  )
+}
+
+function AddExpenseForm({ onAdd, onClose }) {
+  const [name, setName]     = useState('')
+  const [amount, setAmount] = useState('')
+  const [cat, setCat]       = useState('Housing')
+
+  const cats = ['Housing','Food','Transport','Health','Education','Clothing','Leisure','Other']
+
+  const submit = (e) => {
+    e.preventDefault()
+    if (!name || !amount) return
+    onAdd({ name: name.trim(), amount: parseFloat(amount), category: cat })
+    onClose()
+  }
+  return (
+    <form onSubmit={submit} className="bg-[#0f1117] border border-white/10 rounded-2xl p-4 space-y-3">
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-sm font-semibold text-white">Add fixed expense</span>
+        <button type="button" onClick={onClose} className="text-slate-500 hover:text-white p-1"><X size={16}/></button>
+      </div>
+      <input value={name} onChange={e => setName(e.target.value)} placeholder="Name (Rent, Insurance…)"
+        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-600 outline-none focus:border-purple-500/50" />
+      <div className="grid grid-cols-2 gap-2">
+        <input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount €/mo"
+          min="0" step="0.01"
+          className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-600 outline-none focus:border-purple-500/50" />
+        <select value={cat} onChange={e => setCat(e.target.value)}
+          className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-purple-500/50">
+          {cats.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </div>
+      <button type="submit" className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-semibold rounded-xl transition-colors">
+        Add Expense
+      </button>
+    </form>
+  )
+}
+
+// ─── Finance Tab ──────────────────────────────────────────────────────────────
+
+function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription, addExpense, removeExpense, importData, apiKey, addToast }) {
+  const [section, setSection]       = useState('summary')
+  const [showSubForm, setShowSubForm]   = useState(false)
+  const [showExpForm, setShowExpForm]   = useState(false)
+  const [editSalary, setEditSalary] = useState(false)
+  const [salNet, setSalNet]         = useState(String(finance.salary?.net || ''))
+  const [salBrut, setSalBrut]       = useState(String(finance.salary?.brut || ''))
+  const [aiMessages, setAiMessages] = useState([])
+  const [aiInput, setAiInput]       = useState('')
+  const [aiLoading, setAiLoading]   = useState(false)
+  const [importText, setImportText] = useState('')
+  const [importing, setImporting]   = useState(false)
+
+  const subs   = finance.subscriptions || []
+  const exps   = finance.expenses || []
+  const net    = finance.salary?.net || 0
+  const brut   = finance.salary?.brut || 0
+
+  const totalSubMonthly = subs.reduce((s, sub) => s + toMonthly(sub.amount, sub.period), 0)
+  const totalExpMonthly = exps.reduce((s, e) => s + (e.amount || 0), 0)
+  const totalFixed      = totalSubMonthly + totalExpMonthly
+  const disposable      = net - totalFixed
+  const savingsRate     = net > 0 ? Math.max(0, (disposable / net) * 100) : 0
+
+  const saveSalary = () => {
+    updateSalary({ net: parseFloat(salNet) || 0, brut: parseFloat(salBrut) || 0 })
+    setEditSalary(false)
+    addToast('✓ Salary saved')
+  }
+
+  const handleAiSend = async () => {
+    if (!aiInput.trim() || aiLoading) return
+    const userMsg = { role: 'user', content: aiInput.trim() }
+    setAiMessages(p => [...p, userMsg])
+    setAiInput('')
+    setAiLoading(true)
+    try {
+      const finCtx = `My finances: net salary ${fmtMoney(net)}/mo (brut ${fmtMoney(brut)}), ${subs.length} subscriptions costing ${fmtMoney(totalSubMonthly)}/mo, fixed expenses ${fmtMoney(totalExpMonthly)}/mo, disposable ${fmtMoney(disposable)}/mo (${savingsRate.toFixed(0)}% savings rate). I'm in France.`
+      const systemExtra = `\n\nFINANCE CONTEXT:\n${finCtx}\nYou are a French personal finance advisor. Give specific, actionable advice. Mention French specifics (LEP, Livret A, PEA, PER, CAF, impôts) where relevant. Under 150 words unless asked for detail.`
+      const res = await fetch('/api/assist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [...aiMessages, userMsg],
+          tasks: [], habits: [], goals: [], calendarEvents: [],
+          todayStr: toLocalDateStr(new Date()),
+          dayName: new Date().toLocaleDateString('en-US', { weekday: 'long' }),
+          apiKey,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          systemSuffix: systemExtra,
+        }),
+      })
+      const data = await res.json()
+      setAiMessages(p => [...p, { role: 'assistant', content: data.response || data.error || 'Error' }])
+    } catch (err) {
+      setAiMessages(p => [...p, { role: 'assistant', content: '⚠ ' + err.message }])
+    }
+    setAiLoading(false)
+  }
+
+  const handleImport = async () => {
+    if (!importText.trim() || importing) return
+    setImporting(true)
+    try {
+      const res = await fetch('/api/parse-finance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: importText, apiKey }),
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      if (data.salary?.net) {
+        updateSalary({ net: data.salary.net, brut: data.salary.brut || 0 })
+        setSalNet(String(data.salary.net))
+        setSalBrut(String(data.salary.brut || 0))
+      }
+      if (data.subscriptions?.length) {
+        data.subscriptions.forEach(s => addSubscription(s))
+      }
+      if (data.expenses?.length) {
+        data.expenses.forEach(e => addExpense(e))
+      }
+      setImportText('')
+      addToast(`✓ Imported ${(data.subscriptions?.length||0)+(data.expenses?.length||0)} items`)
+    } catch (err) {
+      addToast('⚠ Import failed: ' + err.message, 'error')
+    }
+    setImporting(false)
+  }
+
+  const pills = [
+    { id: 'summary',  label: 'Summary',   emoji: '📊' },
+    { id: 'subs',     label: 'Subs',      emoji: '📱' },
+    { id: 'expenses', label: 'Expenses',  emoji: '🏠' },
+    { id: 'cashflow', label: 'Cash Flow', emoji: '💸' },
+    { id: 'savings',  label: 'Savings',   emoji: '🏦' },
+    { id: 'ai',       label: 'AI Tips',   emoji: '🤖' },
+  ]
+
+  return (
+    <div className="space-y-4 animate-fade-in">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-white flex items-center gap-2">
+            <Euro size={20} className="text-emerald-400" /> Finance
+          </h2>
+          <p className="text-xs text-slate-500 mt-0.5">Personal finance command center</p>
+        </div>
+        {net > 0 && (
+          <div className="text-right">
+            <p className="text-xs text-slate-500">Disposable/mo</p>
+            <p className={`text-base font-bold ${disposable >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {fmtMoney(disposable)}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Pill nav */}
+      <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+        {pills.map(p => (
+          <button key={p.id} onClick={() => setSection(p.id)}
+            className={`flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors
+              ${section === p.id ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-white/5 text-slate-500 border border-white/5 hover:text-white'}`}>
+            <span>{p.emoji}</span> {p.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Summary ── */}
+      {section === 'summary' && (
+        <div className="space-y-3">
+          {/* Salary card */}
+          <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+                <DollarSign size={14} className="text-emerald-400" /> Salary
+              </h3>
+              <button onClick={() => setEditSalary(e => !e)}
+                className="text-xs text-purple-400 hover:text-purple-300 transition-colors">
+                {editSalary ? 'Cancel' : 'Edit'}
+              </button>
+            </div>
+            {editSalary ? (
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">Net / month</label>
+                    <input type="number" value={salNet} onChange={e => setSalNet(e.target.value)}
+                      placeholder="2500" min="0"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-emerald-500/50" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">Brut / month</label>
+                    <input type="number" value={salBrut} onChange={e => setSalBrut(e.target.value)}
+                      placeholder="3200" min="0"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-emerald-500/50" />
+                  </div>
+                </div>
+                <button onClick={saveSalary}
+                  className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold rounded-xl transition-colors">
+                  Save Salary
+                </button>
+              </div>
+            ) : net > 0 ? (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-emerald-500/10 rounded-xl p-3">
+                  <p className="text-[10px] text-slate-500">Net</p>
+                  <p className="text-lg font-bold text-emerald-400">{fmtMoney(net)}</p>
+                  <p className="text-[10px] text-slate-600">per month</p>
+                </div>
+                <div className="bg-white/5 rounded-xl p-3">
+                  <p className="text-[10px] text-slate-500">Brut</p>
+                  <p className="text-lg font-bold text-slate-300">{fmtMoney(brut)}</p>
+                  <p className="text-[10px] text-slate-600">per month</p>
+                </div>
+              </div>
+            ) : (
+              <button onClick={() => setEditSalary(true)}
+                className="w-full py-3 border border-dashed border-white/10 rounded-xl text-sm text-slate-500 hover:text-white hover:border-white/20 transition-colors">
+                + Add your salary
+              </button>
+            )}
+          </div>
+
+          {/* Flow summary grid */}
+          {net > 0 && (
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-red-500/10 border border-red-500/15 rounded-2xl p-3">
+                <p className="text-[10px] text-slate-500 flex items-center gap-1"><CreditCard size={10} /> Subscriptions</p>
+                <p className="text-lg font-bold text-red-400">{fmtMoney(totalSubMonthly)}</p>
+                <p className="text-[10px] text-slate-600">/month · {subs.length} active</p>
+              </div>
+              <div className="bg-orange-500/10 border border-orange-500/15 rounded-2xl p-3">
+                <p className="text-[10px] text-slate-500 flex items-center gap-1"><Wallet size={10} /> Fixed Expenses</p>
+                <p className="text-lg font-bold text-orange-400">{fmtMoney(totalExpMonthly)}</p>
+                <p className="text-[10px] text-slate-600">/month · {exps.length} items</p>
+              </div>
+              <div className={`col-span-2 border rounded-2xl p-3 ${disposable >= 0 ? 'bg-emerald-500/10 border-emerald-500/15' : 'bg-red-500/10 border-red-500/15'}`}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] text-slate-500 flex items-center gap-1"><PiggyBank size={10} /> Disposable Income</p>
+                    <p className={`text-2xl font-black ${disposable >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmtMoney(disposable)}</p>
+                    <p className="text-[10px] text-slate-600">per month after all fixed costs</p>
+                  </div>
+                  <div className="text-right">
+                    <p className={`text-3xl font-black ${savingsRate >= 20 ? 'text-emerald-400' : savingsRate >= 10 ? 'text-yellow-400' : 'text-red-400'}`}>
+                      {savingsRate.toFixed(0)}%
+                    </p>
+                    <p className="text-[10px] text-slate-500">savings rate</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Subscriptions ── */}
+      {section === 'subs' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-slate-400">Total: <span className="text-red-400 font-bold">{fmtMoney(totalSubMonthly)}/mo</span></p>
+            <button onClick={() => setShowSubForm(true)}
+              className="flex items-center gap-1.5 text-xs bg-purple-600/20 text-purple-300 border border-purple-500/30 px-3 py-1.5 rounded-full hover:bg-purple-600/30 transition-colors">
+              <Plus size={12} /> Add
+            </button>
+          </div>
+          {showSubForm && <AddSubForm onAdd={addSubscription} onClose={() => setShowSubForm(false)} />}
+          {subs.length === 0 && !showSubForm ? (
+            <div className="text-center py-12">
+              <CreditCard size={36} className="mx-auto text-slate-700 mb-3" />
+              <p className="text-slate-500 text-sm">No subscriptions tracked yet</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {subs.map(sub => {
+                const monthly = toMonthly(sub.amount, sub.period)
+                return (
+                  <div key={sub.id} className="flex items-center gap-3 bg-white/5 border border-white/8 rounded-xl px-4 py-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-white truncate">{sub.name}</p>
+                      <p className="text-[10px] text-slate-500">{sub.category || 'Other'} · {sub.period}</p>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <p className="text-sm font-bold text-red-400">{fmtMoney(monthly)}<span className="text-[10px] text-slate-500">/mo</span></p>
+                      {sub.period !== 'monthly' && <p className="text-[10px] text-slate-600">{fmtMoney(sub.amount)} {sub.period}</p>}
+                    </div>
+                    <button onClick={() => removeSubscription(sub.id)}
+                      className="text-slate-600 hover:text-red-400 transition-colors ml-2 flex-shrink-0">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {subs.length > 0 && (
+            <div className="bg-red-500/5 border border-red-500/10 rounded-xl px-4 py-3">
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-400">Monthly total</span>
+                <span className="font-bold text-red-400">{fmtMoney(totalSubMonthly)}</span>
+              </div>
+              <div className="flex justify-between text-sm mt-1">
+                <span className="text-slate-500 text-xs">Yearly total</span>
+                <span className="text-slate-400 text-xs">{fmtMoney(totalSubMonthly * 12)}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Fixed Expenses ── */}
+      {section === 'expenses' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-slate-400">Total: <span className="text-orange-400 font-bold">{fmtMoney(totalExpMonthly)}/mo</span></p>
+            <button onClick={() => setShowExpForm(true)}
+              className="flex items-center gap-1.5 text-xs bg-purple-600/20 text-purple-300 border border-purple-500/30 px-3 py-1.5 rounded-full hover:bg-purple-600/30 transition-colors">
+              <Plus size={12} /> Add
+            </button>
+          </div>
+          {showExpForm && <AddExpenseForm onAdd={addExpense} onClose={() => setShowExpForm(false)} />}
+          {exps.length === 0 && !showExpForm ? (
+            <div className="text-center py-12">
+              <Wallet size={36} className="mx-auto text-slate-700 mb-3" />
+              <p className="text-slate-500 text-sm">No fixed expenses tracked yet</p>
+              <p className="text-slate-600 text-xs mt-1">Add rent, insurance, loan payments…</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {exps.map(exp => (
+                <div key={exp.id} className="flex items-center gap-3 bg-white/5 border border-white/8 rounded-xl px-4 py-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-white truncate">{exp.name}</p>
+                    <p className="text-[10px] text-slate-500">{exp.category || 'Other'}</p>
+                  </div>
+                  <p className="text-sm font-bold text-orange-400 flex-shrink-0">{fmtMoney(exp.amount)}<span className="text-[10px] text-slate-500">/mo</span></p>
+                  <button onClick={() => removeExpense(exp.id)}
+                    className="text-slate-600 hover:text-red-400 transition-colors ml-2 flex-shrink-0">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {exps.length > 0 && (
+            <div className="bg-orange-500/5 border border-orange-500/10 rounded-xl px-4 py-3">
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-400">Total fixed/mo</span>
+                <span className="font-bold text-orange-400">{fmtMoney(totalExpMonthly)}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Cash Flow Simulator ── */}
+      {section === 'cashflow' && (
+        <div className="space-y-3">
+          {net === 0 ? (
+            <div className="text-center py-12">
+              <TrendingUp size={36} className="mx-auto text-slate-700 mb-3" />
+              <p className="text-slate-500 text-sm">Add your salary in Summary first</p>
+            </div>
+          ) : (
+            <>
+              <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                <h3 className="text-sm font-semibold text-slate-300 mb-4">Monthly Cash Flow</h3>
+                {[
+                  { label: 'Net Salary',       value: net,              color: 'bg-emerald-500', pct: 100 },
+                  { label: 'Subscriptions',    value: -totalSubMonthly, color: 'bg-red-500',     pct: net > 0 ? (totalSubMonthly/net)*100 : 0 },
+                  { label: 'Fixed Expenses',   value: -totalExpMonthly, color: 'bg-orange-500',  pct: net > 0 ? (totalExpMonthly/net)*100 : 0 },
+                  { label: 'Disposable',       value: disposable,       color: disposable >= 0 ? 'bg-blue-500' : 'bg-red-600', pct: net > 0 ? Math.abs(disposable/net)*100 : 0 },
+                ].map(row => (
+                  <div key={row.label} className="mb-3">
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-slate-400">{row.label}</span>
+                      <span className={row.value < 0 ? 'text-red-400' : 'text-emerald-400'}>{fmtMoney(row.value)}</span>
+                    </div>
+                    <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full ${row.color} transition-all duration-700`}
+                        style={{ width: `${Math.min(100, Math.abs(row.pct)).toFixed(1)}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { label: 'Yearly savings',  value: fmtMoney(Math.max(0, disposable * 12)), sub: 'if fully saved' },
+                  { label: 'Savings rate',    value: `${savingsRate.toFixed(0)}%`,           sub: savingsRate >= 20 ? '🟢 Excellent' : savingsRate >= 10 ? '🟡 Good' : '🔴 Low' },
+                  { label: 'Cost of living',  value: fmtMoney(totalFixed),                   sub: 'fixed/month' },
+                ].map(card => (
+                  <div key={card.label} className="bg-white/5 border border-white/8 rounded-xl p-3 text-center">
+                    <p className="text-[9px] text-slate-500 mb-1">{card.label}</p>
+                    <p className="text-sm font-bold text-white">{card.value}</p>
+                    <p className="text-[9px] text-slate-600 mt-0.5">{card.sub}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Import paste */}
+              <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                <h3 className="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
+                  <Upload size={13} className="text-slate-400" /> Import from bank statement / payslip
+                </h3>
+                <p className="text-[11px] text-slate-600 mb-3">Paste text from your fiche de paie or bank CSV — AI will extract salary & subscriptions.</p>
+                <textarea value={importText} onChange={e => setImportText(e.target.value)}
+                  placeholder="Paste payslip or bank statement text here…"
+                  rows={4}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-600 outline-none focus:border-purple-500/50 resize-none mb-2" />
+                <button onClick={handleImport} disabled={importing || !importText.trim()}
+                  className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2">
+                  {importing ? <><Loader2 size={14} className="animate-spin" /> Parsing…</> : <><Sparkles size={14} /> Parse with AI</>}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Savings Opportunities ── */}
+      {section === 'savings' && (
+        <div className="space-y-3">
+          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-4">
+            <h3 className="text-sm font-semibold text-emerald-300 mb-1">🇫🇷 Épargne en France</h3>
+            <p className="text-xs text-slate-500">Savings vehicles available in France, ordered by priority for most people.</p>
+            {net > 0 && disposable > 0 && (
+              <p className="text-xs text-emerald-400 mt-2 font-medium">
+                You have {fmtMoney(disposable)}/mo to save — here's where to put it:
+              </p>
+            )}
+          </div>
+          <div className="space-y-2">
+            {SAVINGS_VEHICLES.map((v, i) => (
+              <div key={v.id} className="bg-white/5 border border-white/8 rounded-2xl p-4">
+                <div className="flex items-start gap-3">
+                  <span className="text-2xl flex-shrink-0">{v.emoji}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <p className="text-sm font-semibold text-white">{v.name}</p>
+                      {v.rate && (
+                        <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded-full font-medium">
+                          {v.rate}%
+                        </span>
+                      )}
+                      {v.cap && (
+                        <span className="text-[10px] text-slate-500">cap {fmtMoney(v.cap)}</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-400 leading-relaxed">{v.desc}</p>
+                    {v.id === 'lep' && net > 0 && (
+                      <p className={`text-[10px] mt-1.5 font-medium ${net <= 2200 ? 'text-emerald-400' : 'text-yellow-500'}`}>
+                        {net <= 2200 ? '✓ You likely qualify (net ≤ €2,200/mo)' : '⚠ Check eligibility — limit ~€2,200/mo net'}
+                      </p>
+                    )}
+                    {v.id === 'prime' && net > 0 && (
+                      <a href="https://www.caf.fr/allocataires/droits-et-prestations/s-informer-sur-les-aides/solidarite-et-insertion/la-prime-d-activite" target="_blank" rel="noopener noreferrer"
+                        className="text-[10px] text-blue-400 hover:text-blue-300 mt-1 block">
+                        → Simuler sur CAF.fr
+                      </a>
+                    )}
+                  </div>
+                  <span className="text-slate-600 text-xs flex-shrink-0 font-mono">#{i+1}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── AI Finance Advisor ── */}
+      {section === 'ai' && (
+        <div className="space-y-3">
+          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3">
+            <p className="text-xs text-emerald-300 font-medium">🤖 AI Finance Advisor</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">Personalized advice based on your financial profile. France-specific.</p>
+            {!apiKey && <p className="text-[11px] text-yellow-400 mt-1">⚠ Add your OpenAI key in Settings for AI features.</p>}
+          </div>
+          <div className="space-y-3 max-h-96 overflow-y-auto">
+            {aiMessages.length === 0 && (
+              <div className="space-y-2">
+                {['How should I allocate my savings?', 'Am I spending too much on subscriptions?', 'What is the LEP and do I qualify?', 'How to optimize my taxes in France?'].map(q => (
+                  <button key={q} onClick={() => { setAiInput(q) }}
+                    className="w-full text-left text-xs text-slate-400 bg-white/5 hover:bg-white/10 border border-white/5 rounded-xl px-3 py-2.5 transition-colors">
+                    → {q}
+                  </button>
+                ))}
+              </div>
+            )}
+            {aiMessages.map((m, i) => (
+              <div key={i} className={`rounded-xl p-3 text-sm ${m.role === 'user' ? 'bg-purple-600/20 text-white ml-8' : 'bg-white/5 text-slate-300 mr-4'}`}>
+                {m.role === 'assistant' ? <AiText text={m.content} /> : m.content}
+              </div>
+            ))}
+            {aiLoading && (
+              <div className="bg-white/5 rounded-xl p-3 mr-4">
+                <Loader2 size={14} className="animate-spin text-emerald-400" />
+              </div>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <input value={aiInput} onChange={e => setAiInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleAiSend()}
+              placeholder="Ask about your finances…"
+              className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 outline-none focus:border-emerald-500/50" />
+            <button onClick={handleAiSend} disabled={aiLoading || !aiInput.trim() || !apiKey}
+              className="px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-xl transition-colors">
+              <Send size={16} />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Bottom Nav ──────────────────────────────────────────────────────────────
+
 function BottomNav({ activeTab, setActiveTab, activeTasks }) {
   const tabs = [
-    { id: 'home',     icon: Home,      label: 'Home',     badge: 0 },
-    { id: 'tasks',    icon: ListTodo,  label: 'Tasks',    badge: activeTasks },
-    { id: 'ai',       icon: Sparkles,  label: 'AI',       badge: 0 },
-    { id: 'insights', icon: BarChart2, label: 'Insights', badge: 0 },
+    { id: 'home',     icon: Home,        label: 'Home',     badge: 0 },
+    { id: 'tasks',    icon: ListTodo,    label: 'Tasks',    badge: activeTasks },
+    { id: 'ai',       icon: Sparkles,    label: 'AI',       badge: 0 },
+    { id: 'insights', icon: BarChart2,   label: 'Insights', badge: 0 },
+    { id: 'finance',  icon: TrendingUp,  label: 'Finance',  badge: 0 },
   ]
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-40
@@ -2471,7 +3682,7 @@ function BottomNav({ activeTab, setActiveTab, activeTasks }) {
             className={`flex-1 flex flex-col items-center justify-center py-3 gap-1 transition-colors
               ${activeTab === t.id ? 'text-purple-400' : 'text-slate-600 hover:text-slate-400'}`}>
             <div className="relative">
-              <t.icon size={22} />
+              <t.icon size={20} />
               {t.badge > 0 && (
                 <span className="absolute -top-1.5 -right-2.5 text-[9px] bg-purple-500 text-white
                   rounded-full min-w-[16px] h-4 flex items-center justify-center px-1 font-bold leading-none">
@@ -2479,7 +3690,7 @@ function BottomNav({ activeTab, setActiveTab, activeTasks }) {
                 </span>
               )}
             </div>
-            <span className="text-[10px] font-medium">{t.label}</span>
+            <span className="text-[9px] font-medium">{t.label}</span>
           </button>
         ))}
       </div>
@@ -2490,12 +3701,27 @@ function BottomNav({ activeTab, setActiveTab, activeTasks }) {
 // ─── App ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { tasks, addTask, toggleTask, deleteTask, restoreTask, updateTask, toggleSubtask, clearCompleted } = useTasks()
-  const { habits, addHabit, toggleToday, removeHabit } = useHabits()
-  const { goals, addGoal, updateGoal, removeGoal } = useGoals()
+  const { session, signIn, signOut, userId } = useAuth()
   const { toasts, add: addToast, dismiss } = useToast()
-  const { total: totalXP, addXP } = useXP()
-  const { unlocked, tryUnlock } = useAchievements()
+  const { tasks, addTask, toggleTask, deleteTask, restoreTask, updateTask, toggleSubtask, clearCompleted, loadFromCloud: loadTasks, uploadMissing } = useTasks(userId)
+  const { habits, addHabit, toggleToday, removeHabit, loadFromCloud: loadHabits } = useHabits(userId)
+  const { goals, addGoal, updateGoal, removeGoal, loadFromCloud: loadGoals } = useGoals(userId)
+  const { finance, updateSalary, addSubscription, removeSubscription, updateSubscription, addExpense, removeExpense, importData } = useFinance(userId)
+  const { total: totalXP, addXP } = useXP(userId)
+  const { unlocked, tryUnlock } = useAchievements(userId)
+
+  const handleSyncNow = useCallback(async () => {
+    addToast('Syncing from cloud…', 'info')
+    await Promise.all([loadTasks(), loadHabits(), loadGoals()])
+    addToast('✓ Synced from cloud', 'success')
+  }, [loadTasks, loadHabits, loadGoals, addToast])
+
+  const handleUploadLocal = useCallback(async () => {
+    addToast('Uploading missing local data…', 'info')
+    const n = await uploadMissing()
+    addToast(n > 0 ? `✓ Uploaded ${n} missing task${n > 1 ? 's' : ''}` : '✓ Nothing missing — all in sync', 'success')
+  }, [uploadMissing, addToast])
+  const { todayEvents: calendarEvents, calLoading, calError, fetchEvents, refetchToday } = useCalendar(session)
 
   const [apiKey, setApiKey]             = useState(() => localStorage.getItem(AI_KEY_STORAGE) || '')
   const [showSettings, setShowSettings] = useState(false)
@@ -2521,6 +3747,21 @@ export default function App() {
     if (key) localStorage.setItem(AI_KEY_STORAGE, key)
     else localStorage.removeItem(AI_KEY_STORAGE)
   }, [])
+
+  const handleAddTaskWithScheduling = useCallback(async (parsed) => {
+    const task = addTask(parsed)
+    const todayStr = toLocalDateStr(new Date())
+    if (parsed.dueDate === todayStr && session?.provider_token) {
+      const events = calendarEvents.length ? calendarEvents : await fetchEvents(todayStr)
+      const slots  = getFreeSlots(events, (parsed.duration === 'quick' ? 10 : parsed.duration === '30m' ? 30 : parsed.duration === '1h' ? 60 : 30))
+      if (slots.length > 0) {
+        const slot = slots[0]
+        const time = slot.start.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+        setTimeout(() => addToast(`📅 Free slot at ${time} — good time for "${task.title.slice(0, 25)}"`, 'info'), 600)
+      }
+    }
+    return task
+  }, [addTask, calendarEvents, fetchEvents, session, addToast])
 
   const handleDelete = useCallback((id) => {
     const task = tasks.find(t => t.id === id)
@@ -2609,7 +3850,8 @@ export default function App() {
 
   return (
     <div className="min-h-screen min-h-[100dvh] text-white">
-      <div className="max-w-2xl mx-auto px-4 py-6 pb-32">
+      <div className="max-w-2xl mx-auto px-4 pb-32"
+        style={{ paddingTop: 'max(1.5rem, env(safe-area-inset-top, 0px))' }}>
 
         {/* Header */}
         <header className="text-center mb-6 relative">
@@ -2617,23 +3859,33 @@ export default function App() {
             LifeOps
           </h1>
           <p className="text-slate-500 text-sm mt-1">Your personal command center</p>
-          <button
-            onClick={() => setShowSettings(s => !s)}
-            className={`absolute right-0 top-0 p-2 rounded-xl transition-all duration-200
-              ${showSettings ? 'text-purple-400 bg-purple-500/10' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
-            title="AI Settings">
-            {apiKey ? <Sparkles size={18} className="text-purple-400" /> : <Settings size={18} />}
-          </button>
+          <div className="absolute right-0 top-0 flex items-center gap-1">
+            {supabase && (
+              <button onClick={() => setShowSettings(s => !s)} title={session ? `Synced as ${session.user.email}` : 'Sign in for cloud sync'}
+                className="p-2 rounded-xl transition-all duration-200 text-slate-500 hover:text-white hover:bg-white/5">
+                {session ? <Cloud size={16} className="text-green-400" /> : <CloudOff size={16} />}
+              </button>
+            )}
+            <button
+              onClick={() => setShowSettings(s => !s)}
+              className={`p-2 rounded-xl transition-all duration-200
+                ${showSettings ? 'text-purple-400 bg-purple-500/10' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
+              title="AI Settings">
+              {apiKey ? <Sparkles size={18} className="text-purple-400" /> : <Settings size={18} />}
+            </button>
+          </div>
         </header>
 
         {showSettings && (
-          <SettingsPanel apiKey={apiKey} onSave={saveApiKey} onClose={() => setShowSettings(false)} />
+          <SettingsPanel apiKey={apiKey} onSave={saveApiKey} onClose={() => setShowSettings(false)}
+            session={session} onSignIn={signIn} onSignOut={signOut}
+            onSyncNow={handleSyncNow} onUploadLocal={handleUploadLocal} />
         )}
 
         {/* Tasks tab */}
         {activeTab === 'tasks' && (
           <>
-            <QuickCapture onAdd={addTask} addToast={addToast} apiKey={apiKey} />
+            <QuickCapture onAdd={handleAddTaskWithScheduling} addToast={addToast} apiKey={apiKey} />
             <CompactStats tasks={tasks} />
             <FilterBar
               search={search} setSearch={setSearch}
@@ -2682,22 +3934,40 @@ export default function App() {
         {/* Home tab */}
         {activeTab === 'home' && (
           <HomeTab
-            tasks={tasks} habits={habits} goals={goals}
+            tasks={tasks} habits={habits} goals={goals} finance={finance}
             toggleToday={handleToggleHabit} addHabit={addHabit} removeHabit={removeHabit}
             addGoal={handleAddGoal} updateGoal={handleUpdateGoal} removeGoal={removeGoal}
             apiKey={apiKey} totalXP={totalXP}
+            calendarEvents={calendarEvents} calLoading={calLoading} calError={calError}
+            hasToken={!!session?.provider_token}
+            onCalReconnect={signIn} onCalRefresh={refetchToday}
           />
         )}
 
         {/* AI Assistant tab */}
-        {activeTab === 'ai' && <AssistantTab tasks={tasks} apiKey={apiKey} />}
+        {activeTab === 'ai' && <AssistantTab tasks={tasks} habits={habits} goals={goals} apiKey={apiKey} calendarEvents={calendarEvents} />}
 
         {/* Insights tab */}
         {activeTab === 'insights' && <InsightsDashboard tasks={tasks} habits={habits} goals={goals} unlocked={unlocked} />}
+
+        {/* Finance tab */}
+        {activeTab === 'finance' && (
+          <FinanceTab
+            finance={finance}
+            updateSalary={updateSalary}
+            addSubscription={addSubscription}
+            removeSubscription={removeSubscription}
+            addExpense={addExpense}
+            removeExpense={removeExpense}
+            importData={importData}
+            apiKey={apiKey}
+            addToast={addToast}
+          />
+        )}
       </div>
 
       {levelUpTarget && <LevelUpModal levelInfo={levelUpTarget} onClose={() => setLevelUpTarget(null)} />}
-      <FloatingCapture onAdd={addTask} addToast={addToast} apiKey={apiKey} />
+      <FloatingCapture onAdd={handleAddTaskWithScheduling} addToast={addToast} apiKey={apiKey} />
       <Toast toasts={toasts} dismiss={dismiss} />
       <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} activeTasks={tasks.filter(t => !t.completed).length} />
     </div>
