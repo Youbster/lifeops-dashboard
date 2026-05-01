@@ -1,6 +1,4 @@
-// pdf-parse is CommonJS — use createRequire so this ESM file can load it
-import { createRequire } from 'module'
-const _require = createRequire(import.meta.url)
+import { extractText } from 'unpdf'
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -45,44 +43,20 @@ Rules:
   let finalText = text || ''
   const isImage = !!imageBase64
 
-  // ── PDF: extract text with pdf-parse (Node.js, no worker needed) ──
+  // ── PDF: extract text with unpdf (ESM-native, serverless-safe) ──
   if (pdfBase64) {
     try {
-      // Polyfill browser globals that pdfjs touches even during text extraction
-      if (typeof globalThis.DOMMatrix === 'undefined') {
-        globalThis.DOMMatrix = class DOMMatrix {
-          constructor() { this.a=1;this.b=0;this.c=0;this.d=1;this.e=0;this.f=0 }
-          static fromMatrix(m) { return new globalThis.DOMMatrix() }
-        }
-      }
-      if (typeof globalThis.Path2D === 'undefined') {
-        globalThis.Path2D = class Path2D { constructor() {} }
-      }
-      if (typeof globalThis.ImageData === 'undefined') {
-        globalThis.ImageData = class ImageData { constructor(w, h) { this.width=w; this.height=h } }
-      }
-
-      const pdfParse = _require('pdf-parse')
       const buffer = Buffer.from(pdfBase64, 'base64')
-
-      // Custom renderer: extract text directly without canvas/DOM rendering pipeline
-      const options = {
-        pagerender: async (pageData) => {
-          const content = await pageData.getTextContent()
-          return content.items.map(item => item.str).join(' ')
-        },
-      }
-
-      const result = await pdfParse(buffer, options)
-      finalText = result.text || ''
+      const { text } = await extractText(new Uint8Array(buffer), { mergePages: true })
+      finalText = text || ''
 
       if (!finalText.trim()) {
         return res.status(422).json({
-          error: 'This PDF has no selectable text (it may be a scanned image). Please take a screenshot and upload as JPG/PNG instead.',
+          error: 'This PDF has no selectable text (likely a scanned image). Please take a screenshot and upload as JPG/PNG instead.',
         })
       }
     } catch (pdfErr) {
-      console.error('[parse-finance] pdf-parse error:', pdfErr.message)
+      console.error('[parse-finance] unpdf error:', pdfErr.message)
       return res.status(500).json({ error: 'Could not read PDF: ' + pdfErr.message })
     }
   }
