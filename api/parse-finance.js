@@ -48,14 +48,37 @@ Rules:
   // ── PDF: extract text with pdf-parse (Node.js, no worker needed) ──
   if (pdfBase64) {
     try {
+      // Polyfill browser globals that pdfjs touches even during text extraction
+      if (typeof globalThis.DOMMatrix === 'undefined') {
+        globalThis.DOMMatrix = class DOMMatrix {
+          constructor() { this.a=1;this.b=0;this.c=0;this.d=1;this.e=0;this.f=0 }
+          static fromMatrix(m) { return new globalThis.DOMMatrix() }
+        }
+      }
+      if (typeof globalThis.Path2D === 'undefined') {
+        globalThis.Path2D = class Path2D { constructor() {} }
+      }
+      if (typeof globalThis.ImageData === 'undefined') {
+        globalThis.ImageData = class ImageData { constructor(w, h) { this.width=w; this.height=h } }
+      }
+
       const pdfParse = _require('pdf-parse')
       const buffer = Buffer.from(pdfBase64, 'base64')
-      const result = await pdfParse(buffer)
+
+      // Custom renderer: extract text directly without canvas/DOM rendering pipeline
+      const options = {
+        pagerender: async (pageData) => {
+          const content = await pageData.getTextContent()
+          return content.items.map(item => item.str).join(' ')
+        },
+      }
+
+      const result = await pdfParse(buffer, options)
       finalText = result.text || ''
 
       if (!finalText.trim()) {
         return res.status(422).json({
-          error: 'This PDF appears to be a scanned image with no selectable text. Please take a screenshot and upload it as a JPG/PNG instead.',
+          error: 'This PDF has no selectable text (it may be a scanned image). Please take a screenshot and upload as JPG/PNG instead.',
         })
       }
     } catch (pdfErr) {
