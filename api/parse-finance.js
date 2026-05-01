@@ -16,29 +16,53 @@ export default async function handler(req, res) {
   if (!key) return res.status(400).json({ error: 'No API key.' })
   if (!text && !imageBase64 && !pdfBase64) return res.status(400).json({ error: 'No content provided.' })
 
-  const systemPrompt = `You are a financial data extractor specialized in French documents (bulletins de paie, relevés bancaires).
+  const systemPrompt = `You are a precise financial data extractor for French documents (bulletins de paie, relevés bancaires).
 
-Extract all financial data and return a JSON object (omit fields not found):
+Return a JSON object with these fields (omit fields not present):
 {
-  "salary": {
-    "net": <number, net monthly salary EUR — look for "Net à payer", "Salaire net">,
-    "brut": <number, gross monthly salary EUR — look for "Salaire brut", "Rémunération brute">
-  },
-  "subscriptions": [
-    { "name": <string>, "amount": <number EUR>, "period": <"monthly"|"yearly"|"weekly"|"quarterly">, "category": <"Streaming"|"Software"|"Fitness"|"Music"|"News"|"Gaming"|"Utilities"|"Other"> }
-  ],
-  "expenses": [
-    { "name": <string>, "amount": <number EUR/month>, "category": <"Housing"|"Food"|"Transport"|"Health"|"Education"|"Clothing"|"Leisure"|"Other"> }
-  ]
+  "salary": { "net": <number EUR/month>, "brut": <number EUR/month> },
+  "subscriptions": [{ "name": <string>, "amount": <number>, "period": <"monthly"|"yearly"|"quarterly"|"weekly">, "category": <"Streaming"|"Software"|"Fitness"|"Music"|"News"|"Gaming"|"Utilities"|"Other"> }],
+  "expenses": [{ "name": <string>, "amount": <number EUR/month>, "category": <"Housing"|"Food"|"Transport"|"Health"|"Education"|"Clothing"|"Leisure"|"Other"> }]
 }
 
-Rules:
-- Amounts must be positive numbers in EUR
-- If salary appears per year, divide by 12
-- For bank statements: only include recurring charges, not one-off purchases
-- Common French subscriptions: Netflix, Spotify, Canal+, Amazon Prime, Free, SFR, Bouygues, Orange, EDF, Darty, etc.
-- Only include items you are confident about
-- Return ONLY valid JSON, no explanation`
+═══ BULLETIN DE PAIE ═══
+- salary.net = "Net à payer" or "Salaire net"
+- salary.brut = "Salaire brut" or "Rémunération brute"
+- If annual, divide by 12
+
+═══ RELEVÉ BANCAIRE — STRICT RULES ═══
+INCLUDE only lines starting with:
+• "PRLV SEPA" — direct debit, always a real recurring charge (subscriptions, utilities, insurance)
+• "VIR PERM" or "VIR PERMANENT" — standing order, always recurring (rent, savings)
+• Salary credit lines ("VIR SEPA <employer name>") for salary.net only
+
+NEVER INCLUDE:
+• Lines starting with "CB" — card payments, almost always one-off purchases
+• PayPal — amounts vary, not a subscription unless EXACT same amount every month
+• Amazon — usually one-off unless clearly "Amazon Prime" with fixed amount
+• Supermarkets (Carrefour, Leclerc, Monoprix, Auchan, Lidl, etc.)
+• Restaurants, bars, fuel stations
+• ATM withdrawals (DAB, RETRAIT)
+• Variable-amount transfers
+
+RECURRING CONFIDENCE RULES:
+• PRLV SEPA → 95% confidence → always include
+• VIR PERM → 95% confidence → always include as expense (Housing if "LOYER", else Other)
+• Same merchant + same amount appearing 2+ times → include
+• Same merchant + DIFFERENT amounts → one-off, exclude
+• When in doubt → exclude, better to miss one than to add a wrong one
+
+KNOWN FRENCH SUBSCRIPTIONS (PRLV SEPA):
+Streaming: Netflix, Canal+, Disney+, OCS, Salto, Paramount+, Apple TV
+Music: Spotify, Deezer, Apple Music, YouTube Premium
+Telecom: Free, SFR, Bouygues, Orange, Iliad, NRJ Mobile
+Utilities: EDF, Engie, Total Energies, Veolia, GRDF
+Insurance: AXA, MAAF, MACIF, GMF, Allianz, MMA, Covéa, AG2R, April
+Software: Adobe, Microsoft 365, iCloud, Google One, Dropbox, Figma
+Sport: Decathlon+, Basic Fit, Keep Cool, Neoness, Gymlib
+Other: Amazon Prime, Fnac+, FNAC Darty, BlaBlaCar Daily
+
+Return ONLY valid JSON. No explanation. No markdown.`
 
   let finalText = text || ''
   const isImage = !!imageBase64
@@ -77,7 +101,7 @@ Rules:
     } else {
       messages = [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: finalText.slice(0, 8000) },
+        { role: 'user', content: finalText.slice(0, 14000) },
       ]
     }
 
@@ -86,7 +110,8 @@ Rules:
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
       body: JSON.stringify({
         model: isImage ? 'gpt-4o' : 'gpt-4o-mini',
-        max_tokens: 1000,
+        max_tokens: 1500,
+        temperature: 0,  // deterministic — same doc always gives same result
         ...(isImage ? {} : { response_format: { type: 'json_object' } }),
         messages,
       }),
