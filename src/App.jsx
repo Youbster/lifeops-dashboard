@@ -3184,17 +3184,22 @@ function AddExpenseForm({ onAdd, onClose }) {
 // ─── Finance Tab ──────────────────────────────────────────────────────────────
 
 function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription, addExpense, removeExpense, importData, apiKey, addToast }) {
-  const [section, setSection]       = useState('summary')
-  const [showSubForm, setShowSubForm]   = useState(false)
-  const [showExpForm, setShowExpForm]   = useState(false)
-  const [editSalary, setEditSalary] = useState(false)
-  const [salNet, setSalNet]         = useState(String(finance.salary?.net || ''))
-  const [salBrut, setSalBrut]       = useState(String(finance.salary?.brut || ''))
-  const [aiMessages, setAiMessages] = useState([])
-  const [aiInput, setAiInput]       = useState('')
-  const [aiLoading, setAiLoading]   = useState(false)
-  const [importText, setImportText] = useState('')
-  const [importing, setImporting]   = useState(false)
+  const [section, setSection]         = useState('summary')
+  const [showSubForm, setShowSubForm] = useState(false)
+  const [showExpForm, setShowExpForm] = useState(false)
+  const [editSalary, setEditSalary]   = useState(false)
+  const [salNet, setSalNet]           = useState(String(finance.salary?.net || ''))
+  const [salBrut, setSalBrut]         = useState(String(finance.salary?.brut || ''))
+  const [aiMessages, setAiMessages]   = useState([])
+  const [aiInput, setAiInput]         = useState('')
+  const [aiLoading, setAiLoading]     = useState(false)
+  const [importText, setImportText]   = useState('')
+  const [importing, setImporting]     = useState(false)
+  const [importMode, setImportMode]   = useState('file')  // 'file' | 'paste'
+  const [importFile, setImportFile]   = useState(null)
+  const [importResult, setImportResult] = useState(null)
+  const [privacyOpen, setPrivacyOpen] = useState(false)
+  const fileInputRef = useRef(null)
 
   const subs   = finance.subscriptions || []
   const exps   = finance.expenses || []
@@ -3243,34 +3248,97 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
     setAiLoading(false)
   }
 
-  const handleImport = async () => {
-    if (!importText.trim() || importing) return
+  // ── shared: call the API and set importResult for preview ──
+  const runParseApi = async ({ text, imageBase64, mimeType, sourceName }) => {
     setImporting(true)
+    setImportResult(null)
     try {
       const res = await fetch('/api/parse-finance', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: importText, apiKey }),
+        body: JSON.stringify({ text, imageBase64, mimeType, apiKey }),
       })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
-      if (data.salary?.net) {
-        updateSalary({ net: data.salary.net, brut: data.salary.brut || 0 })
-        setSalNet(String(data.salary.net))
-        setSalBrut(String(data.salary.brut || 0))
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      const hasAnything = data.salary?.net || data.subscriptions?.length || data.expenses?.length
+      if (!hasAnything) {
+        addToast('⚠ No financial data detected in this document', 'info')
+      } else {
+        setImportResult({ data, sourceName })
       }
-      if (data.subscriptions?.length) {
-        data.subscriptions.forEach(s => addSubscription(s))
-      }
-      if (data.expenses?.length) {
-        data.expenses.forEach(e => addExpense(e))
-      }
-      setImportText('')
-      addToast(`✓ Imported ${(data.subscriptions?.length||0)+(data.expenses?.length||0)} items`)
     } catch (err) {
-      addToast('⚠ Import failed: ' + err.message, 'error')
+      addToast('⚠ Parse failed: ' + err.message, 'error')
     }
     setImporting(false)
+  }
+
+  // ── apply parsed data to finance profile ──
+  const applyImportResult = () => {
+    if (!importResult) return
+    const { data, sourceName } = importResult
+    let count = 0
+    if (data.salary?.net) {
+      updateSalary({ net: data.salary.net, brut: data.salary.brut || 0 })
+      setSalNet(String(data.salary.net)); setSalBrut(String(data.salary.brut || 0))
+    }
+    ;(data.subscriptions || []).forEach(s => { addSubscription(s); count++ })
+    ;(data.expenses || []).forEach(e => { addExpense(e); count++ })
+    const parts = []
+    if (data.salary?.net) parts.push('salary updated')
+    if (count > 0) parts.push(`${count} item${count !== 1 ? 's' : ''} added`)
+    addToast(`✓ Imported from "${sourceName}": ${parts.join(', ')}`)
+    setImportResult(null); setImportFile(null); setImportText('')
+  }
+
+  // ── handle file selection + analyze ──
+  const handleFileAnalyze = async () => {
+    if (!importFile || importing) return
+    const file = importFile
+    try {
+      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+        // Extract text from PDF pages in the browser using pdfjs-dist
+        const pdfjsLib = await import('pdfjs-dist')
+        pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).href
+        const arrayBuffer = await file.arrayBuffer()
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+        const pageTexts = []
+        for (let i = 1; i <= Math.min(pdf.numPages, 6); i++) {
+          const page = await pdf.getPage(i)
+          const content = await page.getTextContent()
+          pageTexts.push(content.items.map(item => item.str).join(' '))
+        }
+        await runParseApi({ text: pageTexts.join('\n\n'), sourceName: file.name })
+
+      } else if (file.type.startsWith('image/')) {
+        // Send image to GPT-4o vision
+        const base64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload  = e => resolve(e.target.result.split(',')[1])
+          reader.onerror = reject
+          reader.readAsDataURL(file)
+        })
+        await runParseApi({ imageBase64: base64, mimeType: file.type, sourceName: file.name })
+
+      } else {
+        // CSV / TXT: read as plain text
+        const text = await new Promise((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload  = e => resolve(e.target.result)
+          reader.onerror = reject
+          reader.readAsText(file, 'UTF-8')
+        })
+        await runParseApi({ text, sourceName: file.name })
+      }
+    } catch (err) {
+      addToast('⚠ Could not read file: ' + err.message, 'error')
+      setImporting(false)
+    }
+  }
+
+  // ── paste mode ──
+  const handlePasteImport = async () => {
+    if (!importText.trim() || importing) return
+    await runParseApi({ text: importText, sourceName: 'pasted text' })
   }
 
   const pills = [
@@ -3279,6 +3347,7 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
     { id: 'expenses', label: 'Expenses',  emoji: '🏠' },
     { id: 'cashflow', label: 'Cash Flow', emoji: '💸' },
     { id: 'savings',  label: 'Savings',   emoji: '🏦' },
+    { id: 'import',   label: 'Import',    emoji: '📂' },
     { id: 'ai',       label: 'AI Tips',   emoji: '🤖' },
   ]
 
@@ -3508,16 +3577,17 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
             <div className="text-center py-12">
               <TrendingUp size={36} className="mx-auto text-slate-700 mb-3" />
               <p className="text-slate-500 text-sm">Add your salary in Summary first</p>
+              <button onClick={() => setSection('summary')} className="mt-3 text-xs text-purple-400 hover:text-purple-300 transition-colors">→ Go to Summary</button>
             </div>
           ) : (
             <>
               <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
                 <h3 className="text-sm font-semibold text-slate-300 mb-4">Monthly Cash Flow</h3>
                 {[
-                  { label: 'Net Salary',       value: net,              color: 'bg-emerald-500', pct: 100 },
-                  { label: 'Subscriptions',    value: -totalSubMonthly, color: 'bg-red-500',     pct: net > 0 ? (totalSubMonthly/net)*100 : 0 },
-                  { label: 'Fixed Expenses',   value: -totalExpMonthly, color: 'bg-orange-500',  pct: net > 0 ? (totalExpMonthly/net)*100 : 0 },
-                  { label: 'Disposable',       value: disposable,       color: disposable >= 0 ? 'bg-blue-500' : 'bg-red-600', pct: net > 0 ? Math.abs(disposable/net)*100 : 0 },
+                  { label: 'Net Salary',     value: net,              color: 'bg-emerald-500', pct: 100 },
+                  { label: 'Subscriptions',  value: -totalSubMonthly, color: 'bg-red-500',     pct: net > 0 ? (totalSubMonthly/net)*100 : 0 },
+                  { label: 'Fixed Expenses', value: -totalExpMonthly, color: 'bg-orange-500',  pct: net > 0 ? (totalExpMonthly/net)*100 : 0 },
+                  { label: 'Disposable',     value: disposable,       color: disposable >= 0 ? 'bg-blue-500' : 'bg-red-600', pct: net > 0 ? Math.abs(disposable/net)*100 : 0 },
                 ].map(row => (
                   <div key={row.label} className="mb-3">
                     <div className="flex justify-between text-xs mb-1">
@@ -3531,12 +3601,11 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
                   </div>
                 ))}
               </div>
-
               <div className="grid grid-cols-3 gap-2">
                 {[
-                  { label: 'Yearly savings',  value: fmtMoney(Math.max(0, disposable * 12)), sub: 'if fully saved' },
-                  { label: 'Savings rate',    value: `${savingsRate.toFixed(0)}%`,           sub: savingsRate >= 20 ? '🟢 Excellent' : savingsRate >= 10 ? '🟡 Good' : '🔴 Low' },
-                  { label: 'Cost of living',  value: fmtMoney(totalFixed),                   sub: 'fixed/month' },
+                  { label: 'Yearly savings', value: fmtMoney(Math.max(0, disposable * 12)), sub: 'if fully saved' },
+                  { label: 'Savings rate',   value: `${savingsRate.toFixed(0)}%`,           sub: savingsRate >= 20 ? '🟢 Excellent' : savingsRate >= 10 ? '🟡 Good' : '🔴 Low' },
+                  { label: 'Fixed costs',    value: fmtMoney(totalFixed),                   sub: 'per month' },
                 ].map(card => (
                   <div key={card.label} className="bg-white/5 border border-white/8 rounded-xl p-3 text-center">
                     <p className="text-[9px] text-slate-500 mb-1">{card.label}</p>
@@ -3545,22 +3614,10 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
                   </div>
                 ))}
               </div>
-
-              {/* Import paste */}
-              <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
-                <h3 className="text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
-                  <Upload size={13} className="text-slate-400" /> Import from bank statement / payslip
-                </h3>
-                <p className="text-[11px] text-slate-600 mb-3">Paste text from your fiche de paie or bank CSV — AI will extract salary & subscriptions.</p>
-                <textarea value={importText} onChange={e => setImportText(e.target.value)}
-                  placeholder="Paste payslip or bank statement text here…"
-                  rows={4}
-                  className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-600 outline-none focus:border-purple-500/50 resize-none mb-2" />
-                <button onClick={handleImport} disabled={importing || !importText.trim()}
-                  className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2">
-                  {importing ? <><Loader2 size={14} className="animate-spin" /> Parsing…</> : <><Sparkles size={14} /> Parse with AI</>}
-                </button>
-              </div>
+              <button onClick={() => setSection('import')}
+                className="w-full py-2.5 border border-dashed border-purple-500/30 text-purple-400 hover:bg-purple-500/5 text-xs rounded-xl transition-colors flex items-center justify-center gap-2">
+                <Upload size={12} /> Import from payslip or bank statement
+              </button>
             </>
           )}
         </div>
@@ -3612,6 +3669,160 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Import ── */}
+      {section === 'import' && (
+        <div className="space-y-4">
+          {/* Mode toggle */}
+          <div className="flex gap-1 bg-white/[0.06] rounded-xl p-1">
+            <button onClick={() => setImportMode('file')}
+              className={`flex-1 py-2 text-xs rounded-lg font-medium transition-colors flex items-center justify-center gap-1.5
+                ${importMode === 'file' ? 'bg-purple-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}>
+              <FileText size={12} /> Upload File
+            </button>
+            <button onClick={() => setImportMode('paste')}
+              className={`flex-1 py-2 text-xs rounded-lg font-medium transition-colors flex items-center justify-center gap-1.5
+                ${importMode === 'paste' ? 'bg-purple-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}>
+              <Pencil size={12} /> Paste Text
+            </button>
+          </div>
+
+          {importMode === 'file' ? (
+            <>
+              {/* Drop zone */}
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) setImportFile(f) }}
+                className={`border-2 border-dashed rounded-2xl p-6 text-center cursor-pointer transition-all
+                  ${importFile
+                    ? 'border-purple-500/50 bg-purple-500/5'
+                    : 'border-white/10 hover:border-white/25 hover:bg-white/[0.02]'}`}>
+                <input ref={fileInputRef} type="file" accept=".pdf,.csv,.txt,image/*" className="hidden"
+                  onChange={e => { setImportFile(e.target.files?.[0] || null); setImportResult(null) }} />
+                {importFile ? (
+                  <div>
+                    <div className="w-10 h-10 rounded-xl bg-purple-500/20 flex items-center justify-center mx-auto mb-2">
+                      <FileText size={18} className="text-purple-400" />
+                    </div>
+                    <p className="text-sm text-white font-medium truncate px-4">{importFile.name}</p>
+                    <p className="text-xs text-slate-500 mt-0.5">{(importFile.size / 1024).toFixed(0)} KB</p>
+                    <button onClick={e => { e.stopPropagation(); setImportFile(null); setImportResult(null) }}
+                      className="text-xs text-red-400 hover:text-red-300 mt-2 transition-colors">× Remove</button>
+                  </div>
+                ) : (
+                  <div>
+                    <Upload size={28} className="mx-auto text-slate-600 mb-2" />
+                    <p className="text-sm text-slate-400 font-medium">Tap to select or drop a file</p>
+                    <div className="flex items-center justify-center gap-2 mt-2 flex-wrap">
+                      {['PDF', 'CSV', 'TXT', 'JPG', 'PNG'].map(f => (
+                        <span key={f} className="text-[10px] bg-white/5 text-slate-500 px-2 py-0.5 rounded-full">{f}</span>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-slate-600 mt-2">Bulletin de paie · Relevé bancaire · Screenshot</p>
+                  </div>
+                )}
+              </div>
+
+              {!apiKey && (
+                <p className="text-xs text-yellow-400 text-center">⚠ Add your OpenAI key in Settings to use AI import</p>
+              )}
+
+              <button onClick={handleFileAnalyze} disabled={!importFile || importing || !apiKey}
+                className="w-full py-3 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2">
+                {importing
+                  ? <><Loader2 size={14} className="animate-spin" /> Analyzing document…</>
+                  : <><Sparkles size={14} /> Analyze with AI</>}
+              </button>
+            </>
+          ) : (
+            <>
+              <textarea value={importText} onChange={e => setImportText(e.target.value)}
+                placeholder="Paste content from your bulletin de paie, relevé bancaire, or any financial document…"
+                rows={7}
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 outline-none focus:border-purple-500/50 resize-none" />
+              <button onClick={handlePasteImport} disabled={!importText.trim() || importing || !apiKey}
+                className="w-full py-3 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2">
+                {importing
+                  ? <><Loader2 size={14} className="animate-spin" /> Parsing…</>
+                  : <><Sparkles size={14} /> Parse with AI</>}
+              </button>
+              {!apiKey && <p className="text-xs text-yellow-400 text-center">⚠ Add your OpenAI key in Settings</p>}
+            </>
+          )}
+
+          {/* ── Result preview ── */}
+          {importResult && (
+            <div className="bg-emerald-500/10 border border-emerald-500/25 rounded-2xl p-4 space-y-3 animate-fade-in">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-emerald-300 flex items-center gap-2">
+                  <Check size={14} /> Found in "{importResult.sourceName}"
+                </h3>
+                <button onClick={() => setImportResult(null)} className="text-slate-500 hover:text-white p-1"><X size={14}/></button>
+              </div>
+              {importResult.data.salary?.net && (
+                <div className="flex items-center justify-between bg-emerald-500/10 rounded-xl px-3 py-2">
+                  <span className="text-xs text-slate-300 flex items-center gap-1.5"><DollarSign size={11}/> Salary</span>
+                  <span className="text-xs font-semibold text-emerald-400">
+                    {fmtMoney(importResult.data.salary.net)} net
+                    {importResult.data.salary.brut ? ` · ${fmtMoney(importResult.data.salary.brut)} brut` : ''}
+                  </span>
+                </div>
+              )}
+              {(importResult.data.subscriptions || []).map((s, i) => (
+                <div key={i} className="flex items-center justify-between bg-red-500/5 rounded-xl px-3 py-2">
+                  <span className="text-xs text-slate-300 flex items-center gap-1.5"><CreditCard size={11}/> {s.name}</span>
+                  <span className="text-xs font-medium text-red-400">{fmtMoney(toMonthly(s.amount, s.period))}/mo</span>
+                </div>
+              ))}
+              {(importResult.data.expenses || []).map((e, i) => (
+                <div key={i} className="flex items-center justify-between bg-orange-500/5 rounded-xl px-3 py-2">
+                  <span className="text-xs text-slate-300 flex items-center gap-1.5"><Wallet size={11}/> {e.name}</span>
+                  <span className="text-xs font-medium text-orange-400">{fmtMoney(e.amount)}/mo</span>
+                </div>
+              ))}
+              <div className="flex gap-2 pt-1">
+                <button onClick={applyImportResult}
+                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold rounded-xl transition-colors">
+                  💾 Save to Finance Profile
+                </button>
+                <button onClick={() => setImportResult(null)}
+                  className="px-3 py-2 bg-white/5 hover:bg-white/10 text-slate-400 rounded-xl transition-colors">
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── Privacy notice ── */}
+          <div className="bg-white/[0.03] border border-white/8 rounded-xl overflow-hidden">
+            <button onClick={() => setPrivacyOpen(p => !p)}
+              className="w-full flex items-center justify-between px-4 py-3 text-xs transition-colors hover:bg-white/5">
+              <span className="text-slate-500 flex items-center gap-2"><Lock size={11} className="text-slate-600"/> What happens to my documents?</span>
+              {privacyOpen ? <ChevronUp size={12} className="text-slate-600"/> : <ChevronDown size={12} className="text-slate-600"/>}
+            </button>
+            {privacyOpen && (
+              <div className="px-4 pb-4 space-y-2.5 border-t border-white/5 pt-3">
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  <span className="text-emerald-400 font-medium">PDF</span> — Text is extracted page by page <strong>in your browser</strong> using PDF.js. Only the extracted text is sent to OpenAI. The file itself never leaves your device.
+                </p>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  <span className="text-blue-400 font-medium">CSV / TXT</span> — Content is sent directly to OpenAI for analysis. No copy is stored on any LifeOps server.
+                </p>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  <span className="text-purple-400 font-medium">Images (JPG, PNG, screenshot)</span> — The image is sent to OpenAI's vision API for analysis. No copy is stored on any LifeOps server.
+                </p>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  <span className="text-amber-400 font-medium">After analysis</span> — Only structured data (salary, subscriptions, expenses) is saved in LifeOps. Raw document text and images are never stored.
+                </p>
+                <p className="text-[11px] text-slate-600 leading-relaxed">
+                  Per OpenAI's API terms, your data is <strong>not used to train AI models</strong>. It may be retained up to 30 days for safety/abuse monitoring only.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}

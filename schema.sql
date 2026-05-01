@@ -49,6 +49,15 @@ create table if not exists goals (
 alter table goals enable row level security;
 create policy "Users own their goals" on goals for all using (auth.uid() = user_id);
 
+-- Finance (single JSONB blob per user)
+create table if not exists finance (
+  user_id     uuid primary key references auth.users,
+  data        jsonb not null default '{}',
+  updated_at  timestamptz default now()
+);
+alter table finance enable row level security;
+create policy "Users own their finance" on finance for all using (auth.uid() = user_id);
+
 -- XP + Achievements (single row per user)
 create table if not exists user_progress (
   user_id                uuid primary key references auth.users,

@@ -9,55 +9,112 @@ export default async function handler(req, res) {
 
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  const { text, apiKey } = req.body
+  const { text, imageBase64, mimeType, apiKey } = req.body
   const key = process.env.OPENAI_API_KEY || apiKey
   if (!key) return res.status(400).json({ error: 'No API key.' })
-  if (!text) return res.status(400).json({ error: 'No text provided.' })
+  if (!text && !imageBase64) return res.status(400).json({ error: 'No content provided.' })
 
-  const system = `You are a financial data extractor. Given text from a French fiche de paie (payslip) or bank statement, extract structured financial data.
+  const systemPrompt = `You are a financial data extractor specialized in French documents (bulletins de paie, relevés bancaires, comptes de résultat).
 
-Output a JSON object with these fields (omit any that are not present in the text):
+Extract all financial data you can find and return a JSON object with these fields (omit fields not present):
 {
   "salary": {
-    "net": <number, net monthly salary in EUR>,
-    "brut": <number, gross monthly salary in EUR>
+    "net": <number, net monthly salary in EUR — look for "Net à payer", "Salaire net">,
+    "brut": <number, gross monthly salary in EUR — look for "Salaire brut", "Rémunération brute">
   },
   "subscriptions": [
-    { "name": <string>, "amount": <number>, "period": <"monthly"|"yearly"|"weekly"|"quarterly">, "category": <string> }
+    {
+      "name": <string, service name>,
+      "amount": <number, positive EUR>,
+      "period": <"monthly" | "yearly" | "weekly" | "quarterly">,
+      "category": <"Streaming" | "Software" | "Fitness" | "Music" | "News" | "Gaming" | "Utilities" | "Other">
+    }
   ],
   "expenses": [
-    { "name": <string>, "amount": <number>, "category": <"Housing"|"Food"|"Transport"|"Health"|"Education"|"Clothing"|"Leisure"|"Other"> }
+    {
+      "name": <string, expense name>,
+      "amount": <number, positive EUR per month>,
+      "category": <"Housing" | "Food" | "Transport" | "Health" | "Education" | "Clothing" | "Leisure" | "Other">
+    }
   ]
 }
 
 Rules:
-- For payslips: extract "Salaire net" or "Net à payer" as salary.net, and "Salaire brut" as salary.brut
-- For bank statements: identify recurring charges as subscriptions or expenses
-- Amounts should be positive numbers in EUR
-- If period is unclear for subscriptions, assume "monthly"
-- Only include items you're reasonably confident about
-- Return only valid JSON, no explanation`
+- Amounts must be positive numbers in EUR
+- If a salary appears per year, divide by 12
+- For subscriptions, if billing period is unclear assume "monthly"
+- For bank statements: identify recurring charges as subscriptions or fixed expenses; do not include one-off purchases
+- Common French subscriptions: Netflix, Spotify, Canal+, Amazon Prime, Free, SFR, Bouygues, Orange, EDF, etc.
+- Only include items you are confident about — quality over quantity
+- Return only valid JSON, no explanation text`
 
   try {
+    let messages
+    const isImage = !!imageBase64
+
+    if (isImage) {
+      // GPT-4o vision for images
+      messages = [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${mimeType || 'image/jpeg'};base64,${imageBase64}`,
+                detail: 'high',
+              },
+            },
+            {
+              type: 'text',
+              text: 'Extract all financial data from this document. Focus on salary, subscriptions, and fixed monthly expenses.',
+            },
+          ],
+        },
+      ]
+    } else {
+      // Text-based extraction
+      messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: text.slice(0, 8000) },
+      ]
+    }
+
     const upstream = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        max_tokens: 800,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: text.slice(0, 4000) },
-        ],
+        model: isImage ? 'gpt-4o' : 'gpt-4o-mini',
+        max_tokens: 1000,
+        // response_format json_object not supported for vision in some regions; use text + parse
+        ...(isImage ? {} : { response_format: { type: 'json_object' } }),
+        messages,
       }),
     })
+
     if (!upstream.ok) {
       const body = await upstream.text()
-      return res.status(upstream.status).json({ error: `OpenAI ${upstream.status}: ${body.slice(0, 200)}` })
+      return res.status(upstream.status).json({ error: `OpenAI ${upstream.status}: ${body.slice(0, 300)}` })
     }
+
     const data = await upstream.json()
-    const parsed = JSON.parse(data.choices[0].message.content)
+    const raw = data.choices[0].message.content.trim()
+
+    // Parse JSON — for vision responses, extract JSON block if surrounded by markdown
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      // Try to extract JSON from markdown code block
+      const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/) || raw.match(/(\{[\s\S]*\})/)
+      if (match) {
+        parsed = JSON.parse(match[1].trim())
+      } else {
+        throw new Error('Model did not return valid JSON')
+      }
+    }
+
     return res.status(200).json(parsed)
   } catch (err) {
     return res.status(500).json({ error: err.message })
