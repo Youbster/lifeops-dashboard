@@ -3249,14 +3249,14 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
   }
 
   // ── shared: call the API and set importResult for preview ──
-  const runParseApi = async ({ text, imageBase64, mimeType, sourceName }) => {
+  const runParseApi = async ({ text, imageBase64, pdfBase64, mimeType, sourceName }) => {
     setImporting(true)
     setImportResult(null)
     try {
       const res = await fetch('/api/parse-finance', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, imageBase64, mimeType, apiKey }),
+        body: JSON.stringify({ text, imageBase64, pdfBase64, mimeType, apiKey }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
