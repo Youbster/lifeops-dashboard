@@ -3296,18 +3296,14 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
     const file = importFile
     try {
       if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-        // Extract text from PDF pages in the browser using pdfjs-dist
-        const pdfjsLib = await import('pdfjs-dist')
-        pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).href
-        const arrayBuffer = await file.arrayBuffer()
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
-        const pageTexts = []
-        for (let i = 1; i <= Math.min(pdf.numPages, 6); i++) {
-          const page = await pdf.getPage(i)
-          const content = await page.getTextContent()
-          pageTexts.push(content.items.map(item => item.str).join(' '))
-        }
-        await runParseApi({ text: pageTexts.join('\n\n'), sourceName: file.name })
+        // Send PDF as base64 to server — text extraction runs in Node.js there (no browser pdfjs needed)
+        const base64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload  = e => resolve(e.target.result.split(',')[1])
+          reader.onerror = reject
+          reader.readAsDataURL(file)
+        })
+        await runParseApi({ pdfBase64: base64, sourceName: file.name })
 
       } else if (file.type.startsWith('image/')) {
         // Send image to GPT-4o vision
