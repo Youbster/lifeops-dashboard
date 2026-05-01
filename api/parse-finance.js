@@ -1,3 +1,7 @@
+// pdf-parse is CommonJS — use createRequire so this ESM file can load it
+import { createRequire } from 'module'
+const _require = createRequire(import.meta.url)
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
@@ -34,38 +38,29 @@ Rules:
 - Amounts must be positive numbers in EUR
 - If salary appears per year, divide by 12
 - For bank statements: only include recurring charges, not one-off purchases
-- Common French subscriptions: Netflix, Spotify, Canal+, Amazon Prime, Free, SFR, Bouygues, Orange, EDF, etc.
+- Common French subscriptions: Netflix, Spotify, Canal+, Amazon Prime, Free, SFR, Bouygues, Orange, EDF, Darty, etc.
 - Only include items you are confident about
 - Return ONLY valid JSON, no explanation`
 
   let finalText = text || ''
-  let isImage = !!imageBase64
+  const isImage = !!imageBase64
 
-  // ── PDF: extract text in Node.js using pdfjs-dist ──
+  // ── PDF: extract text with pdf-parse (Node.js, no worker needed) ──
   if (pdfBase64) {
     try {
-      const { getDocument, GlobalWorkerOptions } = await import('pdfjs-dist/build/pdf.mjs')
-      // No worker needed for Node.js text extraction
-      GlobalWorkerOptions.workerSrc = ''
-
+      const pdfParse = _require('pdf-parse')
       const buffer = Buffer.from(pdfBase64, 'base64')
-      const loadingTask = getDocument({ data: new Uint8Array(buffer) })
-      const pdf = await loadingTask.promise
-
-      const pages = []
-      for (let i = 1; i <= Math.min(pdf.numPages, 6); i++) {
-        const page = await pdf.getPage(i)
-        const content = await page.getTextContent()
-        pages.push(content.items.map(item => item.str).join(' '))
-      }
-      finalText = pages.join('\n\n')
+      const result = await pdfParse(buffer)
+      finalText = result.text || ''
 
       if (!finalText.trim()) {
-        return res.status(422).json({ error: 'PDF appears to be scanned/image-only. Please take a screenshot and upload as an image instead.' })
+        return res.status(422).json({
+          error: 'This PDF appears to be a scanned image with no selectable text. Please take a screenshot and upload it as a JPG/PNG instead.',
+        })
       }
     } catch (pdfErr) {
-      console.error('[parse-finance] PDF extraction error:', pdfErr.message)
-      return res.status(500).json({ error: 'Could not extract text from PDF: ' + pdfErr.message })
+      console.error('[parse-finance] pdf-parse error:', pdfErr.message)
+      return res.status(500).json({ error: 'Could not read PDF: ' + pdfErr.message })
     }
   }
 
