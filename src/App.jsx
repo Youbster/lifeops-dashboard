@@ -3727,11 +3727,7 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
                 )}
               </div>
 
-              {!apiKey && (
-                <p className="text-xs text-yellow-400 text-center">⚠ Add your OpenAI key in Settings to use AI import</p>
-              )}
-
-              <button onClick={handleFileAnalyze} disabled={!importFile || importing || !apiKey}
+              <button onClick={handleFileAnalyze} disabled={!importFile || importing}
                 className="w-full py-3 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2">
                 {importing
                   ? <><Loader2 size={14} className="animate-spin" /> Analyzing document…</>
@@ -3744,13 +3740,12 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
                 placeholder="Paste content from your bulletin de paie, relevé bancaire, or any financial document…"
                 rows={7}
                 className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 outline-none focus:border-purple-500/50 resize-none" />
-              <button onClick={handlePasteImport} disabled={!importText.trim() || importing || !apiKey}
+              <button onClick={handlePasteImport} disabled={!importText.trim() || importing}
                 className="w-full py-3 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2">
                 {importing
                   ? <><Loader2 size={14} className="animate-spin" /> Parsing…</>
                   : <><Sparkles size={14} /> Parse with AI</>}
               </button>
-              {!apiKey && <p className="text-xs text-yellow-400 text-center">⚠ Add your OpenAI key in Settings</p>}
             </>
           )}
 
@@ -3833,7 +3828,6 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
           <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3">
             <p className="text-xs text-emerald-300 font-medium">🤖 AI Finance Advisor</p>
             <p className="text-[11px] text-slate-500 mt-0.5">Personalized advice based on your financial profile. France-specific.</p>
-            {!apiKey && <p className="text-[11px] text-yellow-400 mt-1">⚠ Add your OpenAI key in Settings for AI features.</p>}
           </div>
           <div className="space-y-3 max-h-96 overflow-y-auto">
             {aiMessages.length === 0 && (
@@ -3862,7 +3856,7 @@ function FinanceTab({ finance, updateSalary, addSubscription, removeSubscription
               onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleAiSend()}
               placeholder="Ask about your finances…"
               className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2.5 text-sm text-white placeholder-slate-600 outline-none focus:border-emerald-500/50" />
-            <button onClick={handleAiSend} disabled={aiLoading || !aiInput.trim() || !apiKey}
+            <button onClick={handleAiSend} disabled={aiLoading || !aiInput.trim()}
               className="px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-xl transition-colors">
               <Send size={16} />
             </button>
